@@ -95,6 +95,8 @@ fileprivate extension Triple.OS {
         switch self {
         case .darwin, .linux, .wasi, .windows, .openbsd:
             return nil // XCFrameworks do not support any of these platforms today.
+        case .linux:
+            return "linux"
         case .macOS:
             return "macos"
         }
