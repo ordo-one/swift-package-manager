@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import CoreCommands
 import PackageModel
 import SPMBuildCore
 import TSCBasic
@@ -81,13 +82,13 @@ enum TestingSupport {
                 ),
                 sanitizers: sanitizers
             )
-            // Add the sdk platform path if we have it. If this is not present, we
-            // might always end up failing.
-            if let sdkPlatformFrameworksPath = try Destination.sdkPlatformFrameworkPaths() {
-                // appending since we prefer the user setting (if set) to the one we inject
-                env.appendPath("DYLD_FRAMEWORK_PATH", value: sdkPlatformFrameworksPath.fwk.pathString)
-                env.appendPath("DYLD_LIBRARY_PATH", value: sdkPlatformFrameworksPath.lib.pathString)
-            }
+
+            // Add the sdk platform path if we have it. If this is not present, we might always end up failing.
+            let sdkPlatformFrameworksPath = try Destination.sdkPlatformFrameworkPaths()
+            // appending since we prefer the user setting (if set) to the one we inject
+            env.appendPath("DYLD_FRAMEWORK_PATH", value: sdkPlatformFrameworksPath.fwk.pathString)
+            env.appendPath("DYLD_LIBRARY_PATH", value: sdkPlatformFrameworksPath.lib.pathString)
+
             try TSCBasic.Process.checkNonZeroExit(arguments: args, environment: env)
             // Read the temporary file's content.
             return try swiftTool.fileSystem.readFileContents(tempFile.path)
@@ -132,6 +133,16 @@ enum TestingSupport {
         if let location = toolchain.xctestPath {
             env.prependPath("Path", value: location.pathString)
         }
+        #elseif os(Linux)
+        var libraryPaths = ["/usr/lib/swift/linux"]
+        if let path = env["PATH"], let firstPathEntry = path.components(separatedBy: ":").first {
+            libraryPaths.append("\(firstPathEntry)/../lib/swift/linux")
+        }
+        if let originalLibraryPaths = env["LD_LIBRARY_PATH"] {
+            libraryPaths.append(originalLibraryPaths)
+        }
+        // Pass this explicitly on Linux because XCTest started requiring it, rdar://103054033
+        env["LD_LIBRARY_PATH"] = libraryPaths.joined(separator: ":")
         #endif
         return env
         #else

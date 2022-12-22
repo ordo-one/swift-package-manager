@@ -11,27 +11,45 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
-import Foundation
+import Dispatch
+@_implementationOnly import Foundation
 import PackageModel
 import TSCBasic
 import enum TSCUtility.Diagnostics
 
 public enum ManifestParseError: Swift.Error, Equatable {
+    /// The manifest is empty, or at least from SwiftPM's perspective it is.
+    case emptyManifest(path: AbsolutePath)
     /// The manifest contains invalid format.
     case invalidManifestFormat(String, diagnosticFile: AbsolutePath?)
+    // TODO: Test this error.
+    case invalidManifestFormat(String, diagnosticFile: AbsolutePath?, compilerCommandLine: [String]?)
 
     /// The manifest was successfully loaded by swift interpreter but there were runtime issues.
     case runtimeManifestErrors([String])
+
+    /// The manifest loader specified import restrictions that the given manifest violated.
+    case importsRestrictedModules([String])
 }
 
 // used to output the errors via the observability system
 extension ManifestParseError: CustomStringConvertible {
     public var description: String {
         switch self {
-        case .invalidManifestFormat(let error, _):
-            return "Invalid manifest\n\(error)"
+        case .emptyManifest(let manifestPath):
+            return "'\(manifestPath)' is empty"
+        case .invalidManifestFormat(let error, _, let compilerCommandLine):
+            let suffix: String
+            if let compilerCommandLine = compilerCommandLine {
+                suffix = " (compiled with: \(compilerCommandLine))"
+            } else {
+                suffix = ""
+            }
+            return "Invalid manifest\(suffix)\n\(error)"
         case .runtimeManifestErrors(let errors):
-            return "Invalid manifest (evaluation failed)\n\(errors.joined(separator: "\n"))"
+            return "invalid manifest (evaluation failed)\n\(errors.joined(separator: "\n"))"
+        case .importsRestrictedModules(let modules):
+            return "invalid manifest, imports restricted modules: \(modules.joined(separator: ", "))"
         }
     }
 }
@@ -144,6 +162,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
     private let isManifestSandboxEnabled: Bool
     private let delegate: ManifestLoaderDelegate?
     private let extraManifestFlags: [String]
+    private let restrictImports: (startingToolsVersion: ToolsVersion, allowedImports: [String])?
 
     private let databaseCacheDir: AbsolutePath?
 
@@ -160,13 +179,15 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         isManifestSandboxEnabled: Bool = true,
         cacheDir: AbsolutePath? = nil,
         delegate: ManifestLoaderDelegate? = nil,
-        extraManifestFlags: [String] = []
+        extraManifestFlags: [String] = [],
+        restrictImports: (startingToolsVersion: ToolsVersion, allowedImports: [String])? = .none
     ) {
         self.toolchain = toolchain
         self.serializedDiagnostics = serializedDiagnostics
         self.isManifestSandboxEnabled = isManifestSandboxEnabled
         self.delegate = delegate
         self.extraManifestFlags = extraManifestFlags
+        self.restrictImports = restrictImports
 
         self.databaseCacheDir = try? cacheDir.map(resolveSymlinks)
 
@@ -279,7 +300,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         // Throw now if we weren't able to parse the manifest.
         guard let manifestJSON = result.manifestJSON, !manifestJSON.isEmpty else {
             let errors = result.errorOutput ?? result.compilerOutput ?? "Missing or empty JSON output from manifest compilation for \(packageIdentity)"
-            throw ManifestParseError.invalidManifestFormat(errors, diagnosticFile: result.diagnosticFile)
+            throw ManifestParseError.invalidManifestFormat(errors, diagnosticFile: result.diagnosticFile, compilerCommandLine: result.compilerCommandLine)
         }
 
         // We should not have any fatal error at this point.
@@ -333,14 +354,17 @@ public final class ManifestLoader: ManifestLoaderProtocol {
             )
         }
 
-        var closeAfterRead = DelayableAction(target: cache) { cache in
+        let closingCompletion = { (result: Result<ManifestJSONParser.Result, Error>) in
             do {
-                try cache.close()
+                try cache?.close()
             } catch {
                 observabilityScope.emit(warning: "failed closing cache: \(error)")
             }
+
+            callbackQueue.async {
+                completion(result)
+            }
         }
-        defer { closeAfterRead.perform() }
 
         let key : CacheKey
         do {
@@ -353,9 +377,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 fileSystem: fileSystem
             )
         } catch {
-            return callbackQueue.async {
-                completion(.failure(error))
-            }
+            return closingCompletion(.failure(error))
         }
 
         do {
@@ -371,16 +393,11 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                     fileSystem: fileSystem,
                     observabilityScope: observabilityScope
                 )
-                return callbackQueue.async {
-                    completion(.success(parsedManifest))
-                }
+                return closingCompletion(.success(parsedManifest))
             }
         } catch {
             observabilityScope.emit(warning: "failed loading cached manifest for '\(key.packageIdentity)': \(error)")
         }
-
-        // delay closing cache until after write.
-        let closeAfterWrite = closeAfterRead.delay()
 
         // shells out and compiles the manifest, finally output a JSON
         observabilityScope.emit(debug: "evaluating manifest for '\(packageIdentity)' v. \(packageVersion?.description ?? "unknown")")
@@ -396,8 +413,6 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 dispatchPrecondition(condition: .onQueue(callbackQueue))
 
                 do {
-                    defer { closeAfterWrite.perform() }
-
                     let evaluationResult = try result.get()
                     // only cache successfully parsed manifests
                     let parseManifest = try self.parseManifest(
@@ -417,19 +432,62 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                         observabilityScope.emit(warning: "failed storing manifest for '\(key.packageIdentity)' in cache: \(error)")
                     }
 
-                    completion(.success(parseManifest))
+                    return closingCompletion(.success(parseManifest))
                 } catch {
-                    callbackQueue.async {
-                        completion(.failure(error))
-                    }
+                    return closingCompletion(.failure(error))
                 }
             }
         } catch {
-            callbackQueue.async {
-                completion(.failure(error))
-            }
+            return closingCompletion(.failure(error))
         }
     }
+
+    private func validateImports(
+        manifestPath: AbsolutePath,
+        toolsVersion: ToolsVersion,
+        callbackQueue: DispatchQueue,
+        completion: @escaping (Result<Void, Error>) -> Void) {
+            // If there are no import restrictions, we do not need to validate.
+            guard let restrictImports = restrictImports, toolsVersion >= restrictImports.startingToolsVersion else {
+                return callbackQueue.async {
+                    completion(.success(()))
+                }
+            }
+
+            // Allowed are the expected defaults, plus anything allowed by the configured restrictions.
+            let allowedImports = ["PackageDescription", "Swift", "SwiftOnoneSupport"] + restrictImports.allowedImports
+
+            // wrap the completion to free concurrency control semaphore
+            let completion: (Result<Void, Error>) -> Void = { result in
+                self.concurrencySemaphore.signal()
+                callbackQueue.async {
+                    completion(result)
+                }
+            }
+
+            // we must not block the calling thread (for concurrency control) so nesting this in a queue
+            self.evaluationQueue.addOperation {
+                do {
+                    // park the evaluation thread based on the max concurrency allowed
+                    self.concurrencySemaphore.wait()
+
+                    let importScanner = SwiftcImportScanner(swiftCompilerEnvironment: self.toolchain.swiftCompilerEnvironment,
+                                                            swiftCompilerFlags: self.extraManifestFlags,
+                                                            swiftCompilerPath: self.toolchain.swiftCompilerPathForManifests)
+
+                    importScanner.scanImports(manifestPath, callbackQueue: callbackQueue) { result in
+                        do {
+                            let imports = try result.get().filter { !allowedImports.contains($0) }
+                            guard imports.isEmpty else {
+                                throw ManifestParseError.importsRestrictedModules(imports)
+                            }
+                        } catch {
+                            completion(.failure(error))
+                        }
+                    }
+                }
+            }
+        }
 
     /// Compiler the manifest at the given path and retrieve the JSON.
     fileprivate func evaluateManifest(
@@ -441,29 +499,54 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         callbackQueue: DispatchQueue,
         completion: @escaping (Result<EvaluationResult, Error>) -> Void
     ) throws {
+        let manifestPreamble: ByteString
+        switch toolsVersion {
+        case .vNext:
+            manifestPreamble = ByteString()
+        default:
+            manifestPreamble = ByteString("import Foundation\n")
+        }
+
         do {
-            if localFileSystem.isFile(manifestPath) {
-                try self.evaluateManifest(
-                    at: manifestPath,
-                    packageIdentity: packageIdentity,
-                    toolsVersion: toolsVersion,
-                    delegateQueue:  delegateQueue,
-                    callbackQueue: callbackQueue,
-                    completion: completion
-                )
-            } else {
-                try withTemporaryFile(suffix: ".swift") { tempFile, cleanupTempFile in
-                    try localFileSystem.writeFileContents(tempFile.path, bytes: ByteString(manifestContents))
-                    try self.evaluateManifest(
-                        at: tempFile.path,
-                        packageIdentity: packageIdentity,
-                        toolsVersion: toolsVersion,
-                        delegateQueue: delegateQueue,
-                        callbackQueue: callbackQueue
-                    ) { result in
-                        dispatchPrecondition(condition: .onQueue(callbackQueue))
-                        cleanupTempFile(tempFile)
-                        completion(result)
+            try withTemporaryDirectory { tempDir, cleanupTempDir in
+                let manifestTempFilePath = tempDir.appending(component: "manifest.swift")
+                try localFileSystem.writeFileContents(manifestTempFilePath, bytes: ByteString(manifestPreamble.contents + manifestContents))
+
+                #if os(Windows)
+                // On Windows, we seem to have issues with the VFS overlay, so let's disable it for now.
+                let effectiveManifestPath = manifestTempFilePath
+                let vfsOverlayTempFilePath: AbsolutePath? = nil
+                #else
+                let effectiveManifestPath = manifestPath
+                let vfsOverlayTempFilePath = tempDir.appending(component: "vfs.yaml")
+                try VFSOverlay(roots: [
+                    VFSOverlay.File(name: manifestPath.pathString, externalContents: manifestTempFilePath.pathString)
+                ]).write(to: vfsOverlayTempFilePath, fileSystem: localFileSystem)
+                #endif
+
+                validateImports(manifestPath: manifestTempFilePath, toolsVersion: toolsVersion, callbackQueue: callbackQueue) { result in
+                    dispatchPrecondition(condition: .onQueue(callbackQueue))
+
+                    do {
+                        try result.get()
+
+                        try self.evaluateManifest(
+                            at: effectiveManifestPath,
+                            vfsOverlayPath: vfsOverlayTempFilePath,
+                            packageIdentity: packageIdentity,
+                            toolsVersion: toolsVersion,
+                            delegateQueue: delegateQueue,
+                            callbackQueue: callbackQueue
+                        ) { result in
+                            dispatchPrecondition(condition: .onQueue(callbackQueue))
+                            cleanupTempDir(tempDir)
+                            completion(result)
+                        }
+                    } catch {
+                        cleanupTempDir(tempDir)
+                        callbackQueue.async {
+                            completion(.failure(error))
+                        }
                     }
                 }
             }
@@ -477,6 +560,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
     /// Helper method for evaluating the manifest.
     func evaluateManifest(
         at manifestPath: AbsolutePath,
+        vfsOverlayPath: AbsolutePath? = nil,
         packageIdentity: PackageIdentity,
         toolsVersion: ToolsVersion,
         delegateQueue: DispatchQueue,
@@ -511,6 +595,10 @@ public final class ManifestLoader: ManifestLoaderProtocol {
 
         var cmd: [String] = []
         cmd += [self.toolchain.swiftCompilerPathForManifests.pathString]
+
+        if let vfsOverlayPath = vfsOverlayPath {
+            cmd += ["-vfsoverlay", vfsOverlayPath.pathString]
+        }
 
         // if runtimePath is set to "PackageFrameworks" that means we could be developing SwiftPM in Xcode
         // which produces a framework for dynamic package products.
@@ -586,6 +674,8 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                     #endif
                     let compiledManifestFile = tmpDir.appending(component: "\(packageIdentity)-manifest\(executableSuffix)")
                     cmd += ["-o", compiledManifestFile.pathString]
+
+                    evaluationResult.compilerCommandLine = cmd
 
                     // Compile the manifest.
                     TSCBasic.Process.popen(arguments: cmd, environment: self.toolchain.swiftCompilerEnvironment, queue: callbackQueue) { result in
@@ -824,6 +914,9 @@ extension ManifestLoader {
 
         /// The manifest in JSON format.
         var manifestJSON: String?
+
+        /// The command line used to compile the manifest
+        var compilerCommandLine: [String]?
 
         /// Any non-compiler error that might have occurred during manifest loading.
         ///

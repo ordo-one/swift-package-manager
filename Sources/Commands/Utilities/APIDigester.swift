@@ -11,11 +11,13 @@
 //===----------------------------------------------------------------------===//
 
 import Dispatch
+import Foundation
 
 import TSCBasic
 
 import SPMBuildCore
 import Basics
+import CoreCommands
 import PackageGraph
 import PackageModel
 import SourceControl
@@ -62,7 +64,7 @@ struct APIDigesterBaselineDumper {
         for modulesToDiff: Set<String>,
         at baselineDir: AbsolutePath?,
         force: Bool,
-        logLevel: Diagnostic.Severity,
+        logLevel: Basics.Diagnostic.Severity,
         swiftTool: SwiftTool
     ) throws -> AbsolutePath {
         var modulesToDiff = modulesToDiff
@@ -187,15 +189,28 @@ public struct SwiftAPIDigester {
         for module: String,
         buildPlan: SPMBuildCore.BuildPlan
     ) throws {
-        var args = ["-dump-sdk"]
+        var args = ["-dump-sdk", "-compiler-style-diags"]
         args += try buildPlan.createAPIToolCommonArgs(includeLibrarySearchPaths: false)
         args += ["-module", module, "-o", outputPath.pathString]
 
-        try runTool(args)
+        let result = try runTool(args)
 
         if !self.fileSystem.exists(outputPath) {
-            throw Error.failedToGenerateBaseline(module)
+            throw Error.failedToGenerateBaseline(module: module)
         }
+
+        try self.fileSystem.readFileContents(outputPath).withData { data in
+            if let jsonObject = try JSONSerialization.jsonObject(with: data, options: []) as? [String:Any] {
+                guard let abiRoot = jsonObject["ABIRoot"] as? [String:Any] else {
+                    throw Error.failedToValidateBaseline(module: module)
+                }
+
+                guard let symbols = abiRoot["children"] as? NSArray, symbols.count > 0 else {
+                    throw Error.noSymbolsInBaseline(module: module, toolOutput: try result.utf8Output())
+                }
+            }
+        }
+
     }
 
     /// Compare the current package API to a provided baseline file.
@@ -232,25 +247,31 @@ public struct SwiftAPIDigester {
         }
     }
 
-    private func runTool(_ args: [String]) throws {
+    @discardableResult private func runTool(_ args: [String]) throws -> ProcessResult {
         let arguments = [tool.pathString] + args
         let process = TSCBasic.Process(
             arguments: arguments,
-            outputRedirection: .collect
+            outputRedirection: .collect(redirectStderr: true)
         )
         try process.launch()
-        try process.waitUntilExit()
+        return try process.waitUntilExit()
     }
 }
 
 extension SwiftAPIDigester {
     public enum Error: Swift.Error, CustomStringConvertible {
-        case failedToGenerateBaseline(String)
+        case failedToGenerateBaseline(module: String)
+        case failedToValidateBaseline(module: String)
+        case noSymbolsInBaseline(module: String, toolOutput: String)
 
         public var description: String {
             switch self {
             case .failedToGenerateBaseline(let module):
                 return "failed to generate baseline for \(module)"
+            case .failedToValidateBaseline(let module):
+                return "failed to validate baseline for \(module)"
+            case .noSymbolsInBaseline(let module, let toolOutput):
+                return "baseline for \(module) contains no symbols, swift-api-digester output: \(toolOutput)"
             }
         }
     }

@@ -31,7 +31,7 @@ Please use [this guide](https://swift.org/getting-started/#using-the-package-man
 
 For Quick Help use the `swift package --help` command.
 
-For documentation on using Swift Package Manager, creating packages, and more, see the [documentation directory](Documentation).
+For documentation on using Swift Package Manager, creating packages, and more, see the [documentation directory](Documentation/README.md).
 
 For documentation on developing the Swift Package Manager itself, see the [contribution guide](CONTRIBUTING.md).
 
@@ -73,7 +73,7 @@ The Swift package manager uses [llbuild](https://github.com/apple/swift-llbuild)
 If you have any trouble with the package manager, help is available. We recommend:
 
 * The [Swift Forums](https://forums.swift.org/c/development/swiftpm/),
-* Swift's [bug tracker](https://bugs.swift.org)
+* SwiftPM's [bug tracker](https://github.com/apple/swift-package-manager/issues)
 
 When reporting an issue please follow the bug reporting guidelines, they can be found in [contribution guide](./CONTRIBUTING.md#reporting-issues).
 

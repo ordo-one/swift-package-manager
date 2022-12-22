@@ -24,23 +24,16 @@ import SPMBuildCore
 struct PIFBuilderParameters {
 
     /// Whether or not build for testability is enabled.
-    public let enableTestability: Bool
+    let enableTestability: Bool
 
     /// Whether to create dylibs for dynamic library products.
-    public let shouldCreateDylibForDynamicProducts: Bool
+    let shouldCreateDylibForDynamicProducts: Bool
 
     /// The path to the library directory of the active toolchain.
-    public let toolchainLibDir: AbsolutePath
+    let toolchainLibDir: AbsolutePath
 
-    /// Creates a `PIFBuilderParameters` instance.
-    /// - Parameters:
-    ///   - enableTestability: Whether or not build for testability is enabled.
-    ///   - shouldCreateDylibForDynamicProducts: Whether to create dylibs for dynamic library products.
-    public init(enableTestability: Bool, shouldCreateDylibForDynamicProducts: Bool, toolchainLibDir: AbsolutePath) {
-        self.enableTestability = enableTestability
-        self.shouldCreateDylibForDynamicProducts = shouldCreateDylibForDynamicProducts
-        self.toolchainLibDir = toolchainLibDir
-    }
+    /// An array of paths to search for pkg-config `.pc` files.
+    let pkgConfigDirectories: [AbsolutePath]
 }
 
 /// PIF object builder for a package graph.
@@ -175,9 +168,10 @@ class PIFProjectBuilder {
     @discardableResult
     func addBuildConfiguration(
         name: String,
-        settings: PIF.BuildSettings = PIF.BuildSettings()
+        settings: PIF.BuildSettings = PIF.BuildSettings(),
+        impartedBuildProperties: PIF.ImpartedBuildProperties = PIF.ImpartedBuildProperties(settings: PIF.BuildSettings())
     ) -> PIFBuildConfigurationBuilder {
-        let builder = PIFBuildConfigurationBuilder(name: name, settings: settings)
+        let builder = PIFBuildConfigurationBuilder(name: name, settings: settings, impartedBuildProperties: impartedBuildProperties)
         buildConfigurations.append(builder)
         return builder
     }
@@ -480,8 +474,9 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
             impartedSettings: &impartedSettings
         )
 
-        pifTarget.addBuildConfiguration(name: "Debug", settings: debugSettings)
-        pifTarget.addBuildConfiguration(name: "Release", settings: releaseSettings)
+        let impartedBuildProperties = PIF.ImpartedBuildProperties(settings: impartedSettings)
+        pifTarget.addBuildConfiguration(name: "Debug", settings: debugSettings, impartedBuildProperties: impartedBuildProperties)
+        pifTarget.addBuildConfiguration(name: "Release", settings: releaseSettings, impartedBuildProperties: impartedBuildProperties)
     }
 
     private func addLibraryTarget(for product: ResolvedProduct) {
@@ -691,8 +686,9 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
             impartedSettings: &impartedSettings
         )
 
-        pifTarget.addBuildConfiguration(name: "Debug", settings: debugSettings)
-        pifTarget.addBuildConfiguration(name: "Release", settings: releaseSettings)
+        let impartedBuildProperties = PIF.ImpartedBuildProperties(settings: impartedSettings)
+        pifTarget.addBuildConfiguration(name: "Debug", settings: debugSettings, impartedBuildProperties: impartedBuildProperties)
+        pifTarget.addBuildConfiguration(name: "Release", settings: releaseSettings, impartedBuildProperties: impartedBuildProperties)
         pifTarget.impartedBuildSettings = impartedSettings
     }
 
@@ -701,16 +697,16 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
             throw InternalError("unexpected target type")
         }
 
-        // Create an aggregate PIF target (which doesn't have an actual product).
-        let pifTarget = addAggregateTarget(guid: target.pifTargetGUID, name: target.name)
-        pifTarget.addBuildConfiguration(name: "Debug", settings: PIF.BuildSettings())
-        pifTarget.addBuildConfiguration(name: "Release", settings: PIF.BuildSettings())
-
         // Impart the header search path to all direct and indirect clients.
         var impartedSettings = PIF.BuildSettings()
 
         var cFlags: [String] = []
-        for result in try pkgConfigArgs(for: systemTarget, fileSystem: fileSystem, observabilityScope: self.observabilityScope) {
+        for result in try pkgConfigArgs(
+            for: systemTarget,
+            pkgConfigDirectories: parameters.pkgConfigDirectories,
+            fileSystem: fileSystem,
+            observabilityScope: observabilityScope
+        ) {
             if let error = result.error {
                 self.observabilityScope.emit(
                     warning: "\(error)",
@@ -725,6 +721,12 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         impartedSettings[.OTHER_LDRFLAGS] = []
         impartedSettings[.OTHER_CFLAGS, default: ["$(inherited)"]] += ["-fmodule-map-file=\(systemTarget.moduleMapPath)"] + cFlags
         impartedSettings[.OTHER_SWIFT_FLAGS, default: ["$(inherited)"]] += ["-Xcc", "-fmodule-map-file=\(systemTarget.moduleMapPath)"] + cFlags
+        let impartedBuildProperties = PIF.ImpartedBuildProperties(settings: impartedSettings)
+
+        // Create an aggregate PIF target (which doesn't have an actual product).
+        let pifTarget = addAggregateTarget(guid: target.pifTargetGUID, name: target.name)
+        pifTarget.addBuildConfiguration(name: "Debug", settings: PIF.BuildSettings(), impartedBuildProperties: impartedBuildProperties)
+        pifTarget.addBuildConfiguration(name: "Release", settings: PIF.BuildSettings(), impartedBuildProperties: impartedBuildProperties)
         pifTarget.impartedBuildSettings = impartedSettings
     }
 
@@ -847,6 +849,9 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
 
             resourcesTarget.addResourceFile(resourceFile)
         }
+
+        let targetGroup = groupTree.addGroup(path: "/", sourceTree: .group)
+        pifTarget.addResourceFile(targetGroup.addFileReference(path: "\(bundleName).bundle", sourceTree: .builtProductsDir))
 
         return bundleName
     }
@@ -1082,9 +1087,10 @@ class PIFBaseTargetBuilder {
     @discardableResult
     public func addBuildConfiguration(
         name: String,
-        settings: PIF.BuildSettings = PIF.BuildSettings()
+        settings: PIF.BuildSettings = PIF.BuildSettings(),
+        impartedBuildProperties: PIF.ImpartedBuildProperties = PIF.ImpartedBuildProperties(settings: PIF.BuildSettings())
     ) -> PIFBuildConfigurationBuilder {
-        let builder = PIFBuildConfigurationBuilder(name: name, settings: settings)
+        let builder = PIFBuildConfigurationBuilder(name: name, settings: settings, impartedBuildProperties: impartedBuildProperties)
         buildConfigurations.append(builder)
         return builder
     }
@@ -1328,18 +1334,20 @@ final class PIFBuildFileBuilder {
 final class PIFBuildConfigurationBuilder {
     let name: String
     let settings: PIF.BuildSettings
+    let impartedBuildProperties: PIF.ImpartedBuildProperties
 
     @DelayedImmutable
     var guid: PIF.GUID
 
-    public init(name: String, settings: PIF.BuildSettings) {
+    public init(name: String, settings: PIF.BuildSettings, impartedBuildProperties: PIF.ImpartedBuildProperties) {
         precondition(!name.isEmpty)
         self.name = name
         self.settings = settings
+        self.impartedBuildProperties = impartedBuildProperties
     }
 
     func construct() -> PIF.BuildConfiguration {
-        PIF.BuildConfiguration(guid: guid, name: name, buildSettings: settings)
+        PIF.BuildConfiguration(guid: guid, name: name, buildSettings: settings, impartedBuildProperties: impartedBuildProperties)
     }
 }
 

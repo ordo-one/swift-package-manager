@@ -79,13 +79,13 @@ public final class BuildOperation: PackageStructureDelegate, SPMBuildCore.BuildS
     /// The output stream for the build delegate.
     private let outputStream: OutputByteStream
 
-    /// The verbosity level to print out at
+    /// The verbosity level to use for diagnostics.
     private let logLevel: Basics.Diagnostic.Severity
 
-    /// File system to operate on
+    /// File system to operate on.
     private let fileSystem: TSCBasic.FileSystem
 
-    /// ObservabilityScope with which to emit diagnostics
+    /// ObservabilityScope with which to emit diagnostics.
     private let observabilityScope: ObservabilityScope
 
     public var builtTestProducts: [BuiltTestProduct] {
@@ -95,6 +95,9 @@ public final class BuildOperation: PackageStructureDelegate, SPMBuildCore.BuildS
     /// File rules to determine resource handling behavior.
     private let additionalFileRules: [FileRuleDescription]
 
+    /// Alternative path to search for pkg-config `.pc` files.
+    private let pkgConfigDirectories: [AbsolutePath]
+
     public init(
         buildParameters: BuildParameters,
         cacheBuildManifest: Bool,
@@ -103,6 +106,7 @@ public final class BuildOperation: PackageStructureDelegate, SPMBuildCore.BuildS
         pluginScriptRunner: PluginScriptRunner,
         pluginWorkDirectory: AbsolutePath,
         disableSandboxForPluginCommands: Bool,
+        pkgConfigDirectories: [AbsolutePath],
         outputStream: OutputByteStream,
         logLevel: Basics.Diagnostic.Severity,
         fileSystem: TSCBasic.FileSystem,
@@ -118,6 +122,7 @@ public final class BuildOperation: PackageStructureDelegate, SPMBuildCore.BuildS
         self.additionalFileRules = additionalFileRules
         self.pluginScriptRunner = pluginScriptRunner
         self.pluginWorkDirectory = pluginWorkDirectory
+        self.pkgConfigDirectories = pkgConfigDirectories
         self.disableSandboxForPluginCommands = disableSandboxForPluginCommands
         self.outputStream = outputStream
         self.logLevel = logLevel
@@ -399,12 +404,14 @@ public final class BuildOperation: PackageStructureDelegate, SPMBuildCore.BuildS
             builtToolsDir: self.buildParameters.buildPath,
             buildEnvironment: self.buildParameters.buildEnvironment,
             toolSearchDirectories: [self.buildParameters.toolchain.swiftCompilerPath.parentDirectory],
+            pkgConfigDirectories: self.pkgConfigDirectories,
             pluginScriptRunner: self.pluginScriptRunner,
             observabilityScope: self.observabilityScope,
             fileSystem: self.fileSystem
         )
 
         // Surface any diagnostics from build tool plugins.
+        var succeeded = true
         for (target, results) in buildToolPluginInvocationResults {
             // There is one result for each plugin that gets applied to a target.
             for result in results {
@@ -420,7 +427,12 @@ public final class BuildOperation: PackageStructureDelegate, SPMBuildCore.BuildS
                 for diag in result.diagnostics {
                     diagnosticsEmitter.emit(diag)
                 }
+                succeeded = succeeded && result.succeeded
             }
+        }
+
+        if !succeeded {
+            throw StringError("build stopped due to build-tool plugin failures")
         }
 
         // Run any prebuild commands provided by build tool plugins. Any failure stops the build.

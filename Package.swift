@@ -28,6 +28,7 @@ let swiftPMDataModelProduct = (
         "PackageCollectionsModel",
         "PackageGraph",
         "PackageLoading",
+        "PackageMetadata",
         "PackageModel",
         "SourceControl",
         "Workspace",
@@ -76,7 +77,6 @@ packageCollectionsSigningTargets.append(
         dependencies: [
             .product(name: "Crypto", package: "swift-crypto"), // for CCryptoBoringSSL
         ],
-        exclude: ["CMakeLists.txt"],
         cSettings: [
             .define("WIN32_LEAN_AND_MEAN"),
         ]
@@ -90,7 +90,6 @@ packageCollectionsSigningTargets.append(
          /** Package collections signing */
          name: "PackageCollectionsSigning",
          dependencies: packageCollectionsSigningDeps,
-         exclude: ["CMakeLists.txt"],
          swiftSettings: swiftSettings
     )
 )
@@ -246,9 +245,7 @@ let package = Package(
             dependencies: [
                 "Basics",
                 "PackageLoading",
-                "PackageModel",
-                "PackageRegistry",
-                "SourceControl"
+                "PackageModel"
             ],
             exclude: ["CMakeLists.txt", "README.md"]
         ),
@@ -260,7 +257,6 @@ let package = Package(
             name: "PackageCollectionsModel",
             dependencies: [],
             exclude: [
-                "CMakeLists.txt",
                 "Formats/v1.md"
             ]
         ),
@@ -274,8 +270,7 @@ let package = Package(
                 "PackageCollectionsSigning",
                 "PackageModel",
                 "SourceControl",
-            ],
-            exclude: ["CMakeLists.txt"]
+            ]
         ),
 
         .target(
@@ -324,7 +319,7 @@ let package = Package(
             /** Support for building using Xcode's build system */
             name: "XCBuildSupport",
             dependencies: ["SPMBuildCore", "PackageGraph"],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt", "CODEOWNERS"]
         ),
         .target(
             /** High level functionality */
@@ -334,13 +329,39 @@ let package = Package(
                 "PackageFingerprint",
                 "PackageGraph",
                 "PackageModel",
+                "PackageRegistry",
                 "SourceControl",
                 "SPMBuildCore",
             ],
             exclude: ["CMakeLists.txt"]
         ),
+        .target(
+            // ** High level interface for package discovery */
+            name: "PackageMetadata",
+            dependencies: [
+                "Basics",
+                "PackageCollections",
+                "PackageModel",
+                "PackageRegistry",
+            ]
+        ),
 
         // MARK: Commands
+
+        .target(
+            /** Minimal set of commands required for bootstrapping a new SwiftPM */
+            name: "CoreCommands",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "Basics",
+                "Build",
+                "PackageFingerprint",
+                "PackageModel",
+                "Workspace",
+                "XCBuildSupport",
+            ],
+            exclude: ["CMakeLists.txt"]
+        ),
 
         .target(
             /** High-level commands */
@@ -349,8 +370,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 "Basics",
                 "Build",
-                "PackageCollections",
-                "PackageFingerprint",
+                "CoreCommands",
                 "PackageGraph",
                 "SourceControl",
                 "Workspace",
@@ -358,6 +378,50 @@ let package = Package(
             ],
             exclude: ["CMakeLists.txt", "README.md"]
         ),
+
+        .target(
+            /** Interacts with cross-compilation destinations */
+            name: "CrossCompilationDestinationsTool",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "Basics",
+                "CoreCommands",
+                "SPMBuildCore",
+                "PackageModel",
+            ]
+        ),
+
+        .target(
+            /** Interacts with package collections */
+            name: "PackageCollectionsTool",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "Basics",
+                "Commands",
+                "CoreCommands",
+                "PackageCollections",
+                "PackageModel",
+            ]
+        ),
+
+        .target(
+            /** Interact with package registry */
+            name: "PackageRegistryTool",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "Basics",
+                "Commands",
+                "CoreCommands",
+                "PackageGraph",
+                "PackageLoading",
+                "PackageModel",
+                "PackageRegistry",
+                "SourceControl",
+                "SPMBuildCore",
+                "Workspace",
+            ]
+        ),
+
         .executableTarget(
             /** The main executable provided by SwiftPM */
             name: "swift-package",
@@ -369,6 +433,17 @@ let package = Package(
             name: "swift-build",
             dependencies: ["Commands"],
             exclude: ["CMakeLists.txt"]
+        ),
+        .executableTarget(
+            /** Builds SwiftPM itself for bootstrapping (minimal version of `swift-build`) */
+            name: "swift-bootstrap",
+            dependencies: ["CoreCommands"],
+            exclude: ["CMakeLists.txt"]
+        ),
+        .executableTarget(
+            /** Interacts with cross-compilation destinations */
+            name: "swift-experimental-destination",
+            dependencies: ["Commands", "CrossCompilationDestinationsTool"]
         ),
         .executableTarget(
             /** Runs package tests */
@@ -385,20 +460,28 @@ let package = Package(
         .executableTarget(
             /** Interacts with package collections */
             name: "swift-package-collection",
-            dependencies: ["Commands"],
-            exclude: ["CMakeLists.txt"]
+            dependencies: ["Commands", "PackageCollectionsTool"]
+        ),
+        .executableTarget(
+            /** Multi-tool entry point for SwiftPM. */
+            name: "swift-package-manager",
+            dependencies: [
+                "Basics",
+                "Commands",
+                "CrossCompilationDestinationsTool",
+                "PackageCollectionsTool",
+                "PackageRegistryTool"
+            ]
         ),
         .executableTarget(
             /** Interact with package registry */
             name: "swift-package-registry",
-            dependencies: ["Commands"],
-            exclude: ["CMakeLists.txt"]
+            dependencies: ["Commands", "PackageRegistryTool"]
         ),
         .executableTarget(
             /** Shim tool to find test names on OS X */
             name: "swiftpm-xctest-helper",
             dependencies: [],
-            exclude: ["CMakeLists.txt"],
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../lib/swift/macosx"], .when(platforms: [.macOS])),
             ]),
@@ -458,7 +541,8 @@ let package = Package(
             name: "WorkspaceTests",
             dependencies: ["Workspace", "SPMTestSupport"]
         ),
-        .testTarget(
+        // rdar://101868275 "error: cannot find 'XCTAssertEqual' in scope" can affect almost any functional test, so we flat out disable them all until we know what is going on
+        /*.testTarget(
             name: "FunctionalTests",
             dependencies: [
                 "swift-build",
@@ -467,7 +551,7 @@ let package = Package(
                 "PackageModel",
                 "SPMTestSupport"
             ]
-        ),
+        ),*/
         .testTarget(
             name: "FunctionalPerformanceTests",
             dependencies: [

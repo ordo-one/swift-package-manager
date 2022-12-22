@@ -215,7 +215,7 @@ final class WorkspaceTests: XCTestCase {
             XCTAssert(rootManifests.count == 0, "\(rootManifests)")
 
             testDiagnostics(observability.diagnostics) { result in
-                let diagnostic = result.check(diagnostic: .prefix("Invalid manifest\n\(path.appending(components: "MyPkg", "Package.swift")):3:8: error: An error in MyPkg"), severity: .error)
+                let diagnostic = result.check(diagnostic: .contains("\(path.appending(components: "MyPkg", "Package.swift")):4:8: error: An error in MyPkg"), severity: .error)
                 XCTAssertEqual(diagnostic?.metadata?.packageIdentity, .init(path: pkgDir))
                 XCTAssertEqual(diagnostic?.metadata?.packageKind, .root(pkgDir))
             }
@@ -4107,7 +4107,7 @@ final class WorkspaceTests: XCTestCase {
         // Check force resolve. This should produce an error because the resolved file is out-of-date.
         workspace.checkPackageGraphFailure(roots: ["Root"], forceResolvedVersions: true) { diagnostics in
             testDiagnostics(diagnostics) { result in
-                result.check(diagnostic: "an out-of-date resolved file was detected at \(sandbox.appending(components: "Package.resolved")), which is not allowed when automatic dependency resolution is disabled; please make sure to update the file to reflect the changes in dependencies. Running resolver because  requirements have changed.", severity: .error)
+                result.check(diagnostic: "an out-of-date resolved file was detected at \(sandbox.appending(components: "Package.resolved")), which is not allowed when automatic dependency resolution is disabled; please make sure to update the file to reflect the changes in dependencies. Running resolver because requirements have changed.", severity: .error)
             }
         }
         workspace.checkManagedDependencies { result in
@@ -4291,6 +4291,8 @@ final class WorkspaceTests: XCTestCase {
 
     // This verifies that the simplest possible loading APIs are available for package clients.
     func testSimpleAPI() throws {
+        throw XCTSkip("This test fails to find XCTAssertEqual; rdar://101868275")
+
         try testWithTemporaryDirectory { path in
             // Create a temporary package as a test case.
             let packagePath = path.appending(component: "MyPkg")
@@ -4601,11 +4603,13 @@ final class WorkspaceTests: XCTestCase {
                     diagnostic: .equal("the target 'Baz' in product 'Baz' contains unsafe build flags"),
                     severity: .error
                 )
+                XCTAssertEqual(diagnostic1?.metadata?.packageIdentity, .plain("foo"))
                 XCTAssertEqual(diagnostic1?.metadata?.targetName, "Foo")
                 let diagnostic2 = result.checkUnordered(
                     diagnostic: .equal("the target 'Bar' in product 'Baz' contains unsafe build flags"),
                     severity: .error
                 )
+                XCTAssertEqual(diagnostic2?.metadata?.packageIdentity, .plain("foo"))
                 XCTAssertEqual(diagnostic2?.metadata?.targetName, "Foo")
             }
         }

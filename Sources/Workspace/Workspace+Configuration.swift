@@ -36,19 +36,22 @@ extension Workspace {
         /// Path to the Package.resolved file.
         public var resolvedVersionsFile: AbsolutePath
 
-        /// Path to the local configuration directory
+        /// Path to the local configuration directory.
         public var localConfigurationDirectory: AbsolutePath
 
-        /// Path to the shared configuration directory
+        /// Path to the shared configuration directory.
         public var sharedConfigurationDirectory: AbsolutePath?
 
-        /// Path to the shared security directory
+        /// Path to the shared security directory.
         public var sharedSecurityDirectory: AbsolutePath?
 
-        /// Path to the shared cache directory
+        /// Path to the shared cache directory.
         public var sharedCacheDirectory: AbsolutePath?
 
-        /// Whether or not to emit a warning about the existence of deprecated configuration files
+        /// Path to the shared cross-compilation destinations directory.
+        public var sharedCrossCompilationDestinationsDirectory: AbsolutePath?
+
+        /// Whether or not to emit a warning about the existence of deprecated configuration files.
         public var emitDeprecatedConfigurationWarning: Bool
 
         // working directories
@@ -663,6 +666,9 @@ public struct WorkspaceConfiguration {
     /// Whether to create a product for use in the Swift REPL
     public var createREPLProduct: Bool
 
+    /// Whether or not there should be import restrictions applied when loading manifests
+    public var restrictImports: (startingToolsVersion: ToolsVersion, allowedImports: [String])?
+
     public init(
         skipDependenciesUpdates: Bool,
         prefetchBasedOnResolvedFile: Bool,
@@ -671,7 +677,8 @@ public struct WorkspaceConfiguration {
         additionalFileRules: [FileRuleDescription],
         sharedDependenciesCacheEnabled: Bool,
         fingerprintCheckingMode: FingerprintCheckingMode,
-        sourceControlToRegistryDependencyTransformation: SourceControlToRegistryDependencyTransformation
+        sourceControlToRegistryDependencyTransformation: SourceControlToRegistryDependencyTransformation,
+        restrictImports: (startingToolsVersion: ToolsVersion, allowedImports: [String])?
     ) {
         self.skipDependenciesUpdates = skipDependenciesUpdates
         self.prefetchBasedOnResolvedFile = prefetchBasedOnResolvedFile
@@ -681,6 +688,7 @@ public struct WorkspaceConfiguration {
         self.sharedDependenciesCacheEnabled = sharedDependenciesCacheEnabled
         self.fingerprintCheckingMode = fingerprintCheckingMode
         self.sourceControlToRegistryDependencyTransformation = sourceControlToRegistryDependencyTransformation
+        self.restrictImports = restrictImports
     }
 
     /// Default instance of WorkspaceConfiguration
@@ -693,7 +701,8 @@ public struct WorkspaceConfiguration {
             additionalFileRules: [],
             sharedDependenciesCacheEnabled: true,
             fingerprintCheckingMode: .strict,
-            sourceControlToRegistryDependencyTransformation: .disabled
+            sourceControlToRegistryDependencyTransformation: .disabled,
+            restrictImports: .none
         )
     }
 

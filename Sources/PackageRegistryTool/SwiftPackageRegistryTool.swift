@@ -12,6 +12,8 @@
 
 import ArgumentParser
 import Basics
+import Commands
+import CoreCommands
 import TSCBasic
 import SPMBuildCore
 import PackageModel

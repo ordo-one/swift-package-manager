@@ -7,7 +7,24 @@
 # See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 
 add_library(Commands
-  Options.swift
+  PackageTools/APIDiff.swift
+  PackageTools/ArchiveSource.swift
+  PackageTools/CompletionTool.swift
+  PackageTools/ComputeChecksum.swift
+  PackageTools/Config.swift
+  PackageTools/Describe.swift
+  PackageTools/DumpCommands.swift
+  PackageTools/EditCommands.swift
+  PackageTools/Format.swift
+  PackageTools/Init.swift
+  PackageTools/Learn.swift
+  PackageTools/PluginCommand.swift
+  PackageTools/ResetCommands.swift
+  PackageTools/Resolve.swift
+  PackageTools/ShowDependencies.swift
+  PackageTools/SwiftPackageTool.swift
+  PackageTools/ToolsVersionCommand.swift
+  PackageTools/Update.swift
   Snippets/CardEvent.swift
   Snippets/Cards/SnippetCard.swift
   Snippets/Cards/SnippetGroupCard.swift
@@ -16,26 +33,23 @@ add_library(Commands
   Snippets/Card.swift
   Snippets/Colorful.swift
   SwiftBuildTool.swift
-  SwiftPackageCollectionsTool.swift
-  SwiftPackageRegistryTool.swift
-  SwiftPackageTool.swift
   SwiftRunTool.swift
   SwiftTestTool.swift
-  SwiftTool.swift
+  ToolWorkspaceDelegate.swift
   Utilities/APIDigester.swift
   Utilities/DependenciesSerializer.swift
-  Utilities/Describe.swift
+  Utilities/DescribedPackage.swift
   Utilities/DOTManifestSerializer.swift
   Utilities/GenerateLinuxMain.swift
   Utilities/MultiRootSupport.swift
+  Utilities/PluginDelegate.swift
   Utilities/SymbolGraphExtract.swift
   Utilities/TestingSupport.swift)
 target_link_libraries(Commands PUBLIC
   ArgumentParser
   Basics
   Build
-  PackageCollections
-  PackageFingerprint
+  CoreCommands
   PackageGraph
   SourceControl
   TSCBasic

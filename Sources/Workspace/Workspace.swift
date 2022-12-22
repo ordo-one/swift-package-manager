@@ -45,6 +45,9 @@ public enum WorkspaceResolveReason: Equatable {
 
     /// An unknown reason.
     case other(String)
+
+    /// Errors previously reported, e.g. during cloning. This will skip emitting additional unhelpful diagnostics.
+    case errorsPreviouslyReported
 }
 
 public struct PackageFetchDetails {
@@ -437,7 +440,8 @@ public class Workspace {
         let location = try Location(forRootPackage: packagePath, fileSystem: fileSystem)
         let manifestLoader = ManifestLoader(
             toolchain: customHostToolchain,
-            cacheDir: location.sharedManifestsCacheDirectory
+            cacheDir: location.sharedManifestsCacheDirectory,
+            restrictImports: configuration?.restrictImports
         )
         try self.init(
             fileSystem: fileSystem,
@@ -541,7 +545,8 @@ public class Workspace {
         let hostToolchain = try customHostToolchain ?? UserToolchain(destination: .hostDestination())
         var manifestLoader = customManifestLoader ?? ManifestLoader(
             toolchain: hostToolchain,
-            cacheDir: location.sharedManifestsCacheDirectory
+            cacheDir: location.sharedManifestsCacheDirectory,
+            restrictImports: configuration?.restrictImports
         )
 
         let configuration = configuration ?? .default
@@ -710,6 +715,8 @@ extension Workspace {
             observabilityScope.emit(.dependencyNotFound(packageName: packageName))
             return
         }
+        
+        let observabilityScope = observabilityScope.makeChildScope(description: "editing package", metadata: dependency.packageRef.diagnosticsMetadata)
 
         try self.unedit(dependency: dependency, forceRemove: forceRemove, root: root, observabilityScope: observabilityScope)
     }
@@ -739,6 +746,8 @@ extension Workspace {
         guard let dependency = self.state.dependencies[.plain(packageName)] else {
             throw StringError("dependency '\(packageName)' was not found")
         }
+
+        let observabilityScope = observabilityScope.makeChildScope(description: "editing package", metadata: dependency.packageRef.diagnosticsMetadata)
 
         let defaultRequirement: PackageRequirement
         switch dependency.state {
@@ -1174,6 +1183,37 @@ extension Workspace {
         }
     }
 
+    public func loadPluginImports(
+        packageGraph: PackageGraph,
+        completion: @escaping(Result<[PackageIdentity: [String: [String]]], Error>) -> Void) {
+        let pluginTargets = packageGraph.allTargets.filter{$0.type == .plugin}
+        let scanner = SwiftcImportScanner(swiftCompilerEnvironment: hostToolchain.swiftCompilerEnvironment, swiftCompilerFlags: hostToolchain.swiftCompilerFlags, swiftCompilerPath: hostToolchain.swiftCompilerPath)
+        var importList = [PackageIdentity: [String: [String]]]()
+
+        for pluginTarget in pluginTargets {
+            let paths = pluginTarget.sources.paths
+            guard let pkgId = packageGraph.package(for: pluginTarget)?.identity else { continue }
+
+            if importList[pkgId] == nil {
+                importList[pkgId] = [pluginTarget.name: []]
+            } else if importList[pkgId]?[pluginTarget.name] == nil {
+                importList[pkgId]?[pluginTarget.name] = []
+            }
+
+            for path in paths {
+                do {
+                    let result = try tsc_await {
+                        scanner.scanImports(path, callbackQueue: DispatchQueue.sharedConcurrent, completion: $0)
+                    }
+                    importList[pkgId]?[pluginTarget.name]?.append(contentsOf: result)
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+        completion(.success(importList))
+    }
+
     /// Loads a single package in the context of a previously loaded graph. This can be useful for incremental loading in a longer-lived program, like an IDE.
     public func loadPackage(
         with identity: PackageIdentity,
@@ -1233,6 +1273,8 @@ extension Workspace {
             observabilityScope.emit(.dependencyNotFound(packageName: packageName))
             return
         }
+        
+        let observabilityScope = observabilityScope.makeChildScope(description: "editing package", metadata: dependency.packageRef.diagnosticsMetadata)
 
         let checkoutState: CheckoutState
         switch dependency.state {
@@ -1775,7 +1817,7 @@ extension Workspace {
         // Remove any managed dependency which has become a root.
         for dependency in dependenciesToCheck {
             if root.packages.keys.contains(dependency.packageRef.identity) {
-                observabilityScope.trap {
+                observabilityScope.makeChildScope(description: "removing managed dependencies", metadata: dependency.packageRef.diagnosticsMetadata).trap {
                     try self.remove(package: dependency.packageRef)
                 }
             }
@@ -2024,7 +2066,7 @@ extension Workspace {
         // Make a copy of dependencies as we might mutate them in the for loop.
         let allDependencies = Array(self.state.dependencies)
         for dependency in allDependencies {
-            observabilityScope.trap {
+            observabilityScope.makeChildScope(description: "copying managed dependencies", metadata: dependency.packageRef.diagnosticsMetadata).trap {
                 // If the dependency is present, we're done.
                 let dependencyPath = self.path(to: dependency)
                 if fileSystem.isDirectory(dependencyPath) {
@@ -2251,6 +2293,7 @@ extension Workspace {
         let group = DispatchGroup()
         for pin in pinsStore.pins {
             group.enter()
+            let observabilityScope = observabilityScope.makeChildScope(description: "requesting package containers", metadata: pin.packageRef.diagnosticsMetadata)
             packageContainerProvider.getContainer(for: pin.packageRef, skipUpdate: self.configuration.skipDependenciesUpdates, observabilityScope: observabilityScope, on: .sharedConcurrent, completion: { _ in
                 group.leave()
             })
@@ -2278,7 +2321,7 @@ extension Workspace {
 
         // Retrieve the required pins.
         for pin in requiredPins {
-            observabilityScope.trap {
+            observabilityScope.makeChildScope(description: "retrieving dependency pins", metadata: pin.packageRef.diagnosticsMetadata).trap {
                 switch pin.packageRef.kind {
                 case .localSourceControl, .remoteSourceControl:
                     _ = try self.checkoutRepository(package: pin.packageRef, at: pin.state, observabilityScope: observabilityScope)
@@ -2300,7 +2343,7 @@ extension Workspace {
             observabilityScope: observabilityScope
         )
 
-        if case let .required(reason) = precomputationResult {
+        if case let .required(reason) = precomputationResult, reason != .errorsPreviouslyReported {
             let reasonString = Self.format(workspaceResolveReason: reason)
 
             if !fileSystem.exists(self.location.resolvedVersionsFile) {
@@ -2481,7 +2524,7 @@ extension Workspace {
 
         // First remove the checkouts that are no longer required.
         for (packageRef, state) in packageStateChanges {
-            observabilityScope.trap {
+            observabilityScope.makeChildScope(description: "removing unneeded checkouts", metadata: packageRef.diagnosticsMetadata).trap {
                 switch state {
                 case .added, .updated, .unchanged: break
                 case .removed:
@@ -2492,7 +2535,7 @@ extension Workspace {
 
         // Update or clone new packages.
         for (packageRef, state) in packageStateChanges {
-            observabilityScope.trap {
+            observabilityScope.makeChildScope(description: "updating or cloning new packages", metadata: packageRef.diagnosticsMetadata).trap {
                 switch state {
                 case .added(let state):
                     _ = try self.updateDependency(package: packageRef, requirement: state.requirement, productFilter: state.products, observabilityScope: observabilityScope)
@@ -2604,6 +2647,10 @@ extension Workspace {
         let precomputationProvider = ResolverPrecomputationProvider(root: root, dependencyManifests: dependencyManifests)
         let resolver = PubgrubDependencyResolver(provider: precomputationProvider, pinsMap: pinsStore.pinsMap, observabilityScope: observabilityScope)
         let result = resolver.solve(constraints: computedConstraints)
+
+        guard !observabilityScope.errorsReported else {
+            return .required(reason: .errorsPreviouslyReported)
+        }
 
         switch result {
         case .success:
@@ -3089,7 +3136,7 @@ extension Workspace {
         try? fileSystem.chmod(.userUnWritable, path: checkoutPath, options: [.recursive, .onlyFiles])
 
         // Record the new state.
-        observabilityScope.emit(debug: "adding '\(package.identity)' (\(package.locationString)) to managed dependencies")
+        observabilityScope.emit(debug: "adding '\(package.identity)' (\(package.locationString)) to managed dependencies", metadata: package.diagnosticsMetadata)
         self.state.dependencies.add(
             try .sourceControlCheckout(
                 packageRef: package,
@@ -3240,7 +3287,7 @@ extension Workspace {
          }
 
          // Record the new state.
-         observabilityScope.emit(debug: "adding '\(package.identity)' (\(package.locationString)) to managed dependencies")
+         observabilityScope.emit(debug: "adding '\(package.identity)' (\(package.locationString)) to managed dependencies", metadata: package.diagnosticsMetadata)
          self.state.dependencies.add(
             try .registryDownload(
                 packageRef: package,
@@ -3366,6 +3413,10 @@ fileprivate extension PackageDependency {
 
 extension Workspace {
     public static func format(workspaceResolveReason reason: WorkspaceResolveReason) -> String {
+        guard reason != .errorsPreviouslyReported else {
+            return ""
+        }
+
         var result = "Running resolver because "
 
         switch reason {
@@ -3413,7 +3464,7 @@ extension Workspace {
 
             result.append(" requirement.")
         default:
-            result.append(" requirements have changed.")
+            result.append("requirements have changed.")
         }
 
         return result
@@ -3557,62 +3608,62 @@ extension Workspace.Location {
     ) throws -> Self {
         var location = self
 
-        // check that shared configuration directory is accessible, or warn + reset if not
-        if let sharedConfigurationDirectory = self.sharedConfigurationDirectory {
-            // It may not always be possible to create default location (for example de to restricted sandbox),
-            // in which case defaultDirectory would be nil.
-            let defaultDirectory = try? fileSystem.getOrCreateSwiftPMConfigurationDirectory(warningHandler: self.emitDeprecatedConfigurationWarning ? warningHandler : { _ in })
-            if defaultDirectory != nil, sharedConfigurationDirectory != defaultDirectory {
-                // custom location _must_ be writable, throw if we cannot access it
-                guard fileSystem.isWritable(sharedConfigurationDirectory) else {
-                    throw StringError("\(sharedConfigurationDirectory) is not accessible or not writable")
-                }
-            } else {
-                // default location _may_ not be writable, in which case we disable the relevant features that depend on it
-                if !fileSystem.isWritable(sharedConfigurationDirectory) {
-                    location.sharedConfigurationDirectory = .none
-                    warningHandler("\(sharedConfigurationDirectory) is not accessible or not writable, disabling user-level configuration features.")
-                }
-            }
-        }
+        try location.validate(
+            keyPath: \.sharedConfigurationDirectory,
+            fileSystem: fileSystem,
+            getOrCreateHandler: {
+                try fileSystem.getOrCreateSwiftPMConfigurationDirectory(warningHandler: self.emitDeprecatedConfigurationWarning ? warningHandler : { _ in })
+            },
+            warningHandler: warningHandler
+        )
 
-        // check that shared configuration directory is accessible, or warn + reset if not
-        if let sharedSecurityDirectory = self.sharedSecurityDirectory {
-            // It may not always be possible to create default location (for example de to restricted sandbox),
-            // in which case defaultDirectory would be nil.
-            let defaultDirectory = try? fileSystem.getOrCreateSwiftPMSecurityDirectory()
-            if defaultDirectory != nil, sharedSecurityDirectory != defaultDirectory {
-                // custom location _must_ be writable, throw if we cannot access it
-                guard fileSystem.isWritable(sharedSecurityDirectory) else {
-                    throw StringError("\(sharedSecurityDirectory) is not accessible or not writable")
-                }
-            } else {
-                // default location _may_ not be writable, in which case we disable the relevant features that depend on it
-                if !fileSystem.isWritable(sharedSecurityDirectory) {
-                    location.sharedSecurityDirectory = .none
-                    warningHandler("\(sharedSecurityDirectory) is not accessible or not writable, disabling user-level security features.")
-                }
-            }
-        }
+        try location.validate(
+            keyPath: \.sharedSecurityDirectory,
+            fileSystem: fileSystem,
+            getOrCreateHandler: fileSystem.getOrCreateSwiftPMSecurityDirectory,
+            warningHandler: warningHandler
+        )
 
-        // check that shared configuration directory is accessible, or warn + reset if not
-        if let sharedCacheDirectory = self.sharedCacheDirectory {
-            // It may not always be possible to create default location (for example de to restricted sandbox),
-            // in which case defaultDirectory would be nil.
-            let defaultDirectory = try? fileSystem.getOrCreateSwiftPMCacheDirectory()
-            if defaultDirectory != nil, sharedCacheDirectory != defaultDirectory {
-                // custom location _must_ be writable, throw if we cannot access it
-                guard fileSystem.isWritable(sharedCacheDirectory) else {
-                    throw StringError("\(sharedCacheDirectory) is not accessible or not writable")
-                }
-            } else {
-                if !fileSystem.isWritable(sharedCacheDirectory) {
-                    location.sharedCacheDirectory = .none
-                    warningHandler("\(sharedCacheDirectory) is not accessible or not writable, disabling user-level cache features.")
-                }
-            }
-        }
+        try location.validate(
+            keyPath: \.sharedCacheDirectory,
+            fileSystem: fileSystem,
+            getOrCreateHandler: fileSystem.getOrCreateSwiftPMCacheDirectory,
+            warningHandler: warningHandler
+        )
+
+        try location.validate(
+            keyPath: \.sharedCrossCompilationDestinationsDirectory,
+            fileSystem: fileSystem,
+            getOrCreateHandler: fileSystem.getOrCreateSwiftPMCrossCompilationDestinationsDirectory,
+            warningHandler: warningHandler
+        )
+
         return location
+    }
+
+    mutating func validate(
+        keyPath: WritableKeyPath<Workspace.Location, AbsolutePath?>,
+        fileSystem: FileSystem,
+        getOrCreateHandler: () throws -> AbsolutePath,
+        warningHandler: @escaping (String) -> Void
+    ) throws {
+        // check that shared configuration directory is accessible, or warn + reset if not
+        if let sharedDirectory = self[keyPath: keyPath] {
+            // It may not always be possible to create default location (for example de to restricted sandbox),
+            // in which case defaultDirectory would be nil.
+            let defaultDirectory = try? getOrCreateHandler()
+            if defaultDirectory != nil, sharedDirectory != defaultDirectory {
+                // custom location _must_ be writable, throw if we cannot access it
+                guard fileSystem.isWritable(sharedDirectory) else {
+                    throw StringError("\(sharedDirectory) is not accessible or not writable")
+                }
+            } else {
+                if !fileSystem.isWritable(sharedDirectory) {
+                    self[keyPath: keyPath] = nil
+                    warningHandler("\(sharedDirectory) is not accessible or not writable, disabling user-level cache features.")
+                }
+            }
+        }
     }
 }
 
