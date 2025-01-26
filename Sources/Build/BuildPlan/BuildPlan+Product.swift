@@ -45,14 +45,26 @@ extension BuildPlan {
         }
 
         // Add flags for binary dependencies.
-        for binaryPath in dependencies.libraryBinaryPaths {
+        var dynamicLibraries: Set<Substring> = []
+        for binaryPath in dependencies.sharedLibraryBinaries {
+            if binaryPath.basename.starts(with: "lib"), binaryPath.extension == "so" {
+                buildProduct.additionalFlags += ["-L", binaryPath.parentDirectory.pathString]
+                dynamicLibraries.insert(binaryPath.basenameWithoutExt.dropFirst(3))
+            } else {
+                self.observabilityScope.emit(error: "unexpected binary library")
+            }
+        }
+        for binaryPath in dependencies.xcframeworkBinaries {
             if binaryPath.extension == "framework" {
                 buildProduct.additionalFlags += ["-framework", binaryPath.basenameWithoutExt]
             } else if binaryPath.basename.starts(with: "lib") {
-                buildProduct.additionalFlags += ["-l\(binaryPath.basenameWithoutExt.dropFirst(3))"]
+                dynamicLibraries.insert(binaryPath.basenameWithoutExt.dropFirst(3))
             } else {
                 self.observabilityScope.emit(error: "unexpected binary framework")
             }
+        }
+        for dynamicLibrary: Substring in dynamicLibraries {
+            buildProduct.additionalFlags += ["-l\(dynamicLibrary)"]
         }
 
         // Don't link libc++ or libstd++ when building for Embedded Swift.
@@ -100,21 +112,10 @@ extension BuildPlan {
             }
         }
 
-        buildProduct.staticTargets = dependencies.staticTargets
-        buildProduct.dylibs = try dependencies.dylibs.map {
-            guard let product = productMap[$0.id] else {
-                throw InternalError("unknown product \($0)")
-            }
-            return product
-        }
-        buildProduct.objects += try dependencies.staticTargets.flatMap { targetName -> [AbsolutePath] in
-            guard let target = targetMap[targetName.id] else {
-                throw InternalError("unknown target \(targetName)")
-            }
-            return try target.objects
-        }
-        buildProduct.libraryBinaryPaths = dependencies.libraryBinaryPaths
-
+        buildProduct.staticTargets = dependencies.staticTargets.map(\.module)
+        buildProduct.dylibs = dependencies.dylibs
+        buildProduct.objects += try dependencies.staticTargets.flatMap { try $0.objects }
+        buildProduct.libraryBinaryPaths = dependencies.xcframeworkBinaries
         buildProduct.availableTools = dependencies.availableTools
     }
 
@@ -123,10 +124,11 @@ extension BuildPlan {
         of product: ResolvedProduct,
         buildParameters: BuildParameters
     ) throws -> (
-        dylibs: [ResolvedProduct],
-        staticTargets: [ResolvedTarget],
-        systemModules: [ResolvedTarget],
-        libraryBinaryPaths: Set<AbsolutePath>,
+        dylibs: [ProductBuildDescription],
+        staticTargets: [ModuleBuildDescription],
+        systemModules: [ResolvedModule],
+        sharedLibraryBinaries: Set<AbsolutePath>,
+        xcframeworkBinaries: Set<AbsolutePath>,
         availableTools: [String: AbsolutePath]
     ) {
         /* Prior to tools-version 5.9, we used to erroneously recursively traverse executable/plugin dependencies and statically include their
@@ -200,10 +202,18 @@ extension BuildPlan {
         })
 
         // Create empty arrays to collect our results.
+<<<<<<< HEAD
         var linkLibraries = [ResolvedProduct]()
         var staticTargets = [ResolvedTarget]()
         var systemModules = [ResolvedTarget]()
         var libraryBinaryPaths: Set<AbsolutePath> = []
+=======
+        var linkLibraries = [ProductBuildDescription]()
+        var staticTargets = [ModuleBuildDescription]()
+        var systemModules = [ResolvedModule]()
+        var sharedLibraryBinaries: Set<AbsolutePath> = []
+        var xcframeworkBinaries: Set<AbsolutePath> = []
+>>>>>>> d01f6ba5e (automatically populate linker flags for dynamic library dependencies)
         var availableTools = [String: AbsolutePath]()
 
         for dependency in allTargets {
@@ -245,13 +255,28 @@ extension BuildPlan {
                     case .xcframework:
                         let libraries = try self.parseXCFramework(for: binaryTarget, triple: buildParameters.triple)
                         for library in libraries {
-                            libraryBinaryPaths.insert(library.libraryPath)
+                            xcframeworkBinaries.insert(library.libraryPath)
                         }
                     case .artifactsArchive:
+<<<<<<< HEAD
                         let tools = try self.parseArtifactsArchive(for: binaryTarget, triple: buildParameters.triple)
                         tools.forEach { availableTools[$0.name] = $0.executablePath  }
                     case.unknown:
                         throw InternalError("unknown binary target '\(target.name)' type")
+=======
+                        let libraries = try self.parseLibraries(
+                            in: binaryTarget, triple: productDescription.buildParameters.triple
+                        )
+                        for library in libraries {
+                            sharedLibraryBinaries.insert(library.libraryPath)
+                        }
+                        let tools = try self.parseExecutables(
+                            in: binaryTarget, triple: productDescription.buildParameters.triple
+                        )
+                        tools.forEach { availableTools[$0.name] = $0.executablePath }
+                    case .unknown:
+                        throw InternalError("unknown binary target '\(module.name)' type")
+>>>>>>> d01f6ba5e (automatically populate linker flags for dynamic library dependencies)
                     }
                 case .plugin:
                     continue
@@ -272,6 +297,7 @@ extension BuildPlan {
             }
         }
 
+<<<<<<< HEAD
         return (linkLibraries, staticTargets, systemModules, libraryBinaryPaths, availableTools)
     }
 
@@ -281,5 +307,8 @@ extension BuildPlan {
             let execInfos = try binaryTarget.parseArtifactArchives(for: triple, fileSystem: self.fileSystem)
             return execInfos.filter{!$0.supportedTriples.isEmpty}
         }
+=======
+        return (linkLibraries, staticTargets, systemModules, sharedLibraryBinaries, xcframeworkBinaries, availableTools)
+>>>>>>> d01f6ba5e (automatically populate linker flags for dynamic library dependencies)
     }
 }

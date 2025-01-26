@@ -679,21 +679,21 @@ public extension PluginTarget {
                 executableOrBinaryTarget = executableTarget
             }
 
-            // For a binary target we create a `vendedTool`.
-            if let target = executableOrBinaryTarget as? BinaryTarget {
-                // TODO: Memoize this result for the host triple
-                let execInfos = try target.parseArtifactArchives(for: hostTriple, fileSystem: fileSystem)
-                return try execInfos.map{ .vendedTool(name: $0.name, path: $0.executablePath, supportedTriples: try $0.supportedTriples.map{ try $0.withoutVersion().tripleString }) }
-            }
-            // For an executable target we create a `builtTool`.
-            else if executableOrBinaryTarget.type == .executable {
-                return try [.builtTool(name: builtToolName, path: RelativePath(validating: executableOrBinaryTarget.name))]
-            }
-            else {
-                return []
-            }
-        })
-    }
+        // For a binary target we create a `vendedTool`.
+        if let module = executableOrBinaryModule as? BinaryModule {
+            // TODO: Memoize this result for the host triple
+            let execInfos = try module.parseExecutables(for: hostTriple, fileSystem: fileSystem)
+            return try execInfos.map{ .vendedTool(name: $0.name, path: $0.executablePath, supportedTriples: try $0.supportedTriples.map{ try $0.withoutVersion().tripleString }) }
+        }
+        // For an executable target we create a `builtTool`.
+        else if executableOrBinaryModule.type == .executable {
+            return try [.builtTool(name: builtToolName, path: RelativePath(validating: executableOrBinaryModule.name))]
+        }
+        else {
+            return []
+        }
+    })
+}
 
     func processAccessibleTools(packageGraph: ModulesGraph, fileSystem: FileSystem, environment: BuildEnvironment, for hostTriple: Triple, builtToolHandler: (_ name: String, _ path: RelativePath) throws -> AbsolutePath?) throws -> [String: (path: AbsolutePath, triples: [String]?)] {
         var pluginAccessibleTools: [String: (path: AbsolutePath, triples: [String]?)] = [:]
