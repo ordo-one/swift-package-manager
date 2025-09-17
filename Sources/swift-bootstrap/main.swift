@@ -358,14 +358,29 @@ struct SwiftBootstrapBuildTool: AsyncParsableCommand {
                     observabilityScope: self.observabilityScope
                 )
             case .swiftbuild:
+                let pluginScriptRunner = DefaultPluginScriptRunner(
+                    fileSystem: self.fileSystem,
+                    cacheDir: scratchDirectory.appending("plugin-cache"),
+                    toolchain: self.hostToolchain,
+                    extraPluginSwiftCFlags: [],
+                    enableSandbox: true,
+                    verboseOutput: self.logLevel <= .info
+                )
+
                 return try SwiftBuildSystem(
                     buildParameters: buildParameters,
                     packageGraphLoader: asyncUnsafePackageGraphLoader,
                     packageManagerResourcesDirectory: nil,
+                    additionalFileRules: [],
                     outputStream: TSCBasic.stdoutStream,
                     logLevel: logLevel,
                     fileSystem: self.fileSystem,
-                    observabilityScope: self.observabilityScope
+                    observabilityScope: self.observabilityScope,
+                    pluginConfiguration: .init(
+                        scriptRunner: pluginScriptRunner,
+                        workDirectory: scratchDirectory.appending(component: "plugin-working-directory"),
+                        disableSandbox: false
+                    ),
                 )
             }
         }
@@ -394,7 +409,7 @@ struct SwiftBootstrapBuildTool: AsyncParsableCommand {
             let input = loadedManifests.map { identity, manifest in KeyedPair(manifest, key: identity) }
             _ = try await topologicalSort(input) { pair in
                 // When bootstrapping no special trait build configuration is used
-                let dependenciesRequired = try pair.item.dependenciesRequired(for: .everything, nil)
+                let dependenciesRequired = try pair.item.dependenciesRequired(for: .everything)
                 let dependenciesToLoad = dependenciesRequired.map{ $0.packageRef }.filter { !loadedManifests.keys.contains($0.identity) }
                 let dependenciesManifests = try await self.loadManifests(manifestLoader: manifestLoader, packages: dependenciesToLoad)
                 dependenciesManifests.forEach { loadedManifests[$0.key] = $0.value }
@@ -408,7 +423,8 @@ struct SwiftBootstrapBuildTool: AsyncParsableCommand {
             let packageGraphRoot = try PackageGraphRoot(
                 input: .init(packages: [packagePath]),
                 manifests: [packagePath: rootPackageManifest],
-                observabilityScope: observabilityScope
+                observabilityScope: observabilityScope,
+                enabledTraitsMap: .init()
             )
 
             return try ModulesGraph.load(
@@ -420,7 +436,8 @@ struct SwiftBootstrapBuildTool: AsyncParsableCommand {
                 binaryArtifacts: [:],
                 prebuilts: [:],
                 fileSystem: fileSystem,
-                observabilityScope: observabilityScope
+                observabilityScope: observabilityScope,
+                enabledTraitsMap: [:] // When bootstrapping no special trait build configuration is used
             )
         }
 

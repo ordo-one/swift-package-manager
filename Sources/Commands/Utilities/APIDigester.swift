@@ -104,7 +104,7 @@ struct APIDigesterBaselineDumper {
         // Clone the current package in a sandbox and checkout the baseline revision.
         let repositoryProvider = GitRepositoryProvider()
         let specifier = RepositorySpecifier(path: baselinePackageRoot)
-        let workingCopy = try repositoryProvider.createWorkingCopy(
+        let workingCopy = try await repositoryProvider.createWorkingCopy(
             repository: specifier,
             sourcePath: packageRoot,
             at: baselinePackageRoot,
@@ -140,7 +140,6 @@ struct APIDigesterBaselineDumper {
         // FIXME: We need to implement the build tool invocation closure here so that build tool plugins work with the APIDigester. rdar://86112934
         let buildSystem = try await swiftCommandState.createBuildSystem(
             explicitBuildSystem: .native,
-            traitConfiguration: .init(),
             cacheBuildManifest: false,
             productsBuildParameters: productsBuildParameters,
             toolsBuildParameters: toolsBuildParameters,

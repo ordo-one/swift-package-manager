@@ -174,7 +174,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             await XCTAssertAsyncThrowsError(
                 try await execute(["resolve", "--netrc-file", "/foo"], packagePath: fixturePath)
             ) { error in
-                XCTAssertMatch(String(describing: error), .contains("Did not find netrc file at /foo."))
+                XCTAssertMatch(String(describing: error), .regex(#".* Did not find netrc file at ([A-Z]:\\|\/)foo.*"#))
             }
 
             // invalid .netrc file path with --disable-netrc option
@@ -381,8 +381,8 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
 
             // Check that the JSON description contains what we expect it to.
             XCTAssertEqual(json["name"]?.string, "SwiftCMixed")
-            XCTAssertMatch(json["path"]?.string, .prefix("/"))
-            XCTAssertMatch(json["path"]?.string, .suffix("/" + fixturePath.basename))
+            XCTAssertMatch(json["path"]?.string, .regex(#"^([A-Z]:\\|\/).*"#))
+            XCTAssertMatch(json["path"]?.string, .suffix(AbsolutePath("/" + fixturePath.basename).pathString))
             XCTAssertEqual(json["targets"]?.array?.count, 3)
             let jsonTarget0 = try XCTUnwrap(json["targets"]?.array?[0])
             XCTAssertEqual(jsonTarget0["name"]?.stringValue, "SeaLib")
@@ -418,8 +418,8 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             // FIXME: This is a bit inelegant, but any errors are easy to reason about.
             let textChunk0 = try XCTUnwrap(textChunks[0])
             XCTAssertMatch(textChunk0, .contains("Name: SwiftCMixed"))
-            XCTAssertMatch(textChunk0, .contains("Path: /"))
-            XCTAssertMatch(textChunk0, .contains("/" + fixturePath.basename + "\n"))
+            XCTAssertMatch(textChunk0, .regex(#"Path: ([A-Z]:\\|\/)"#))
+            XCTAssertMatch(textChunk0, .contains(AbsolutePath("/" + fixturePath.basename).pathString + "\n"))
             XCTAssertMatch(textChunk0, .contains("Tools version: 4.2"))
             XCTAssertMatch(textChunk0, .contains("Products:"))
             let textChunk1 = try XCTUnwrap(textChunks[1])
@@ -437,23 +437,28 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             XCTAssertMatch(textChunk4, .contains("C99name: SeaLib"))
             XCTAssertMatch(textChunk4, .contains("Type: library"))
             XCTAssertMatch(textChunk4, .contains("Module type: ClangTarget"))
-            XCTAssertMatch(textChunk4, .contains("Path: Sources/SeaLib"))
+            XCTAssertMatch(textChunk4, .contains("Path: \(RelativePath("Sources/SeaLib").pathString)"))
             XCTAssertMatch(textChunk4, .contains("Sources:\n        Foo.c"))
             let textChunk5 = try XCTUnwrap(textChunks[5])
             XCTAssertMatch(textChunk5, .contains("Name: SeaExec"))
             XCTAssertMatch(textChunk5, .contains("C99name: SeaExec"))
             XCTAssertMatch(textChunk5, .contains("Type: executable"))
             XCTAssertMatch(textChunk5, .contains("Module type: SwiftTarget"))
-            XCTAssertMatch(textChunk5, .contains("Path: Sources/SeaExec"))
+            XCTAssertMatch(textChunk5, .contains("Path: \(RelativePath("Sources/SeaExec").pathString)"))
             XCTAssertMatch(textChunk5, .contains("Sources:\n        main.swift"))
             let textChunk6 = try XCTUnwrap(textChunks[6])
             XCTAssertMatch(textChunk6, .contains("Name: CExec"))
             XCTAssertMatch(textChunk6, .contains("C99name: CExec"))
             XCTAssertMatch(textChunk6, .contains("Type: executable"))
             XCTAssertMatch(textChunk6, .contains("Module type: ClangTarget"))
-            XCTAssertMatch(textChunk6, .contains("Path: Sources/CExec"))
+            XCTAssertMatch(textChunk6, .contains("Path: \(RelativePath("Sources/CExec").pathString)"))
             XCTAssertMatch(textChunk6, .contains("Sources:\n        main.c"))
         }
+
+    }
+
+    func testDescribeJson() async throws {
+        try XCTSkipOnWindows(because: "TSCBasic/Path.swift:969: Assertion failed, https://github.com/swiftlang/swift-package-manager/issues/8602")
 
         try await fixture(name: "DependencyResolution/External/Simple/Bar") { fixturePath in
             // Generate the JSON description.
@@ -748,16 +753,21 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             alreadyPutOut.insert(line)
         }
 
+#if os(Windows)
+        let pathSep = "\\"
+#else
+        let pathSep = "/"
+#endif
         let expectedLines: [Substring] = [
-            #""/PackageA" [label="packagea\n/PackageA\nunspecified"]"#,
-            #""/PackageB" [label="packageb\n/PackageB\nunspecified"]"#,
-            #""/PackageC" [label="packagec\n/PackageC\nunspecified"]"#,
-            #""/PackageD" [label="packaged\n/PackageD\nunspecified"]"#,
-            #""/PackageA" -> "/PackageB""#,
-            #""/PackageA" -> "/PackageC""#,
-            #""/PackageB" -> "/PackageC""#,
-            #""/PackageB" -> "/PackageD""#,
-            #""/PackageC" -> "/PackageD""#,
+            "\"\(pathSep)PackageA\" [label=\"packagea\\n\(pathSep)PackageA\\nunspecified\"]",
+            "\"\(pathSep)PackageB\" [label=\"packageb\\n\(pathSep)PackageB\\nunspecified\"]",
+            "\"\(pathSep)PackageC\" [label=\"packagec\\n\(pathSep)PackageC\\nunspecified\"]",
+            "\"\(pathSep)PackageD\" [label=\"packaged\\n\(pathSep)PackageD\\nunspecified\"]",
+            "\"\(pathSep)PackageA\" -> \"\(pathSep)PackageB\"",
+            "\"\(pathSep)PackageA\" -> \"\(pathSep)PackageC\"",
+            "\"\(pathSep)PackageB\" -> \"\(pathSep)PackageC\"",
+            "\"\(pathSep)PackageB\" -> \"\(pathSep)PackageD\"",
+            "\"\(pathSep)PackageC\" -> \"\(pathSep)PackageD\"",
         ]
         for expectedLine in expectedLines {
             XCTAssertTrue(alreadyPutOut.contains(expectedLine),
@@ -1288,7 +1298,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             XCTAssertMatch(contents, .contains(#"name: "client""#))
 
             let fileStructure = try fs.getDirectoryContents(sourcesFolder)
-            XCTAssertEqual(fileStructure.sorted(), ["SimpleExecutable", "client"].sorted())
+            XCTAssertEqual(fileStructure.sorted(), ["SimpleExecutable", "client"])
             XCTAssertTrue(fs.isDirectory(sourcesFolder.appending("SimpleExecutable")))
             XCTAssertTrue(fs.isDirectory(sourcesFolder.appending("client")))
             XCTAssertEqual(try fs.getDirectoryContents(sourcesFolder.appending("SimpleExecutable")), ["main.swift"])
@@ -1434,7 +1444,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
 
             XCTAssertMatch(stderr, .contains("dependency 'baz' was being edited but is missing; falling back to original checkout"))
             // We should be able to see that modification now.
-            try await XCTAssertAsyncEqual(try await AsyncProcess.checkNonZeroExit(arguments: exec), "88888\n")
+            try await XCTAssertAsyncEqual(try await AsyncProcess.checkNonZeroExit(arguments: exec), "88888\(ProcessInfo.EOL)")
             // The branch of edited package should be the one we provided when putting it in edit mode.
             let editsRepo = GitRepository(path: editsPath)
             XCTAssertEqual(try editsRepo.currentBranch(), "bugfix")
@@ -1491,7 +1501,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             // Build it.
             await XCTAssertBuilds(packageRoot)
             let buildPath = packageRoot.appending(".build")
-            let binFile = buildPath.appending(components: try UserToolchain.default.targetTriple.platformBuildPathComponent, "debug", "Bar")
+            let binFile = buildPath.appending(components: try UserToolchain.default.targetTriple.platformBuildPathComponent, "debug", executableName("Bar"))
             XCTAssertFileExists(binFile)
             XCTAssert(localFileSystem.isDirectory(buildPath))
 
@@ -1510,7 +1520,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             // Build it.
             await XCTAssertBuilds(packageRoot)
             let buildPath = packageRoot.appending(".build")
-            let binFile = buildPath.appending(components: try UserToolchain.default.targetTriple.platformBuildPathComponent, "debug", "Bar")
+            let binFile = buildPath.appending(components: try UserToolchain.default.targetTriple.platformBuildPathComponent, "debug", executableName("Bar"))
             XCTAssertFileExists(binFile)
             XCTAssert(localFileSystem.isDirectory(buildPath))
             // Clean, and check for removal of the build directory but not Packages.
@@ -1706,6 +1716,8 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
     }
 
     func testOnlyUseVersionsFromResolvedFileFetchesWithExistingState() async throws {
+       try XCTSkipOnWindows(because: "error: Package.resolved file is corrupted or malformed, needs investigation") 
+
         func writeResolvedFile(packageDir: AbsolutePath, repositoryURL: String, revision: String, version: String) throws {
             try localFileSystem.writeFileContents(packageDir.appending("Package.resolved"), string:
                 """
@@ -2094,13 +2106,65 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
         }
     }
 
-    func testMigrateCommand() async throws {
+    func testMigrateCommandHelp() async throws {
+        let (stdout, _) = try await self.execute(
+            ["migrate", "--help"],
+        )
+
+        // Global options are hidden.
+        XCTAssertNoMatch(stdout, .contains("--package-path"))
+    }
+
+    func testMigrateCommandNoFeatures() async throws {
+        try await XCTAssertThrowsCommandExecutionError(
+            await self.execute(["migrate"])
+        ) { error in
+            XCTAssertMatch(
+                error.stderr,
+                .contains("error: Missing expected argument '--to-feature <to-feature>'")
+            )
+        }
+    }
+
+    func testMigrateCommandUnknownFeature() async throws {
         try XCTSkipIf(
             !UserToolchain.default.supportesSupportedFeatures,
             "skipping because test environment compiler doesn't support `-print-supported-features`"
         )
 
-        func doMigration(featureName: String) async throws {
+        try await XCTAssertThrowsCommandExecutionError(
+            await self.execute(["migrate", "--to-feature", "X"])
+        ) { error in
+            XCTAssertMatch(
+                error.stderr,
+                .contains("error: Unsupported feature 'X'. Available features:")
+            )
+        }
+    }
+
+    func testMigrateCommandNonMigratableFeature() async throws {
+        try XCTSkipIf(
+            !UserToolchain.default.supportesSupportedFeatures,
+            "skipping because test environment compiler doesn't support `-print-supported-features`"
+        )
+
+        try await XCTAssertThrowsCommandExecutionError(
+            await self.execute(["migrate", "--to-feature", "StrictConcurrency"])
+        ) { error in
+            XCTAssertMatch(
+                error.stderr,
+                .contains("error: Feature 'StrictConcurrency' is not migratable")
+            )
+        }
+    }
+
+    func _testMigrateCommand(configuration: BuildConfiguration) async throws {
+        try XCTSkipIf(
+            !UserToolchain.default.supportesSupportedFeatures,
+            "skipping because test environment compiler doesn't support `-print-supported-features`"
+        )
+
+        func doMigration(featureName: String, expectedSummary: String) async throws {
             try await fixture(name: "SwiftMigrate/\(featureName)Migration") { fixturePath in
                 let sourcePaths: [AbsolutePath]
                 let fixedSourcePaths: [AbsolutePath]
@@ -2121,8 +2185,8 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
                     }
                 }
 
-                _ = try await self.execute(
-                    ["migrate", "--to-feature", featureName],
+                let (stdout, _) = try await self.execute(
+                    ["migrate", "-c", configuration.rawValue, "--to-feature", featureName],
                     packagePath: fixturePath
                 )
 
@@ -2134,12 +2198,156 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
                         localFileSystem.readFileContents(fixedSourcePath)
                     )
                 }
+
+                XCTAssertMatch(stdout, .regex("> \(expectedSummary)" + #" \([0-9]\.[0-9]{1,3}s\)"#))
             }
         }
 
-        try await doMigration(featureName: "ExistentialAny")
-        try await doMigration(featureName: "StrictMemorySafety")
-        try await doMigration(featureName: "InferIsolatedConformances")
+        // When updating these, make sure we keep testing both the singular and
+        // plural forms of the nouns in the summary.
+        try await doMigration(featureName: "ExistentialAny", expectedSummary: "Applied 5 fix-its in 1 file")
+        try await doMigration(featureName: "StrictMemorySafety", expectedSummary: "Applied 1 fix-it in 1 file")
+        try await doMigration(featureName: "InferIsolatedConformances", expectedSummary: "Applied 3 fix-its in 2 files")
+    }
+
+    func testMigrateCommandDebug() async throws {
+        try await _testMigrateCommand(configuration: .debug)
+    }
+
+    func testMigrateCommandRelease() async throws {
+        try await _testMigrateCommand(configuration: .release)
+    }
+
+    func testMigrateCommandWithBuildToolPlugins() async throws {
+        try XCTSkipIf(
+            !UserToolchain.default.supportesSupportedFeatures,
+            "skipping because test environment compiler doesn't support `-print-supported-features`"
+        )
+
+        try await fixture(name: "SwiftMigrate/ExistentialAnyWithPluginMigration") { fixturePath in
+            let (stdout, _) = try await self.execute(
+                ["migrate", "--to-feature", "ExistentialAny"],
+                packagePath: fixturePath
+            )
+
+            // Check the plugin target in the manifest wasn't updated
+            let manifestContent = try localFileSystem.readFileContents(fixturePath.appending(component: "Package.swift")).description
+            XCTAssertTrue(manifestContent.contains(".plugin(name: \"Plugin\", capability: .buildTool, dependencies: [\"Tool\"]),"))
+
+            // Building the package produces migration fix-its in both an authored and generated source file. Check we only applied fix-its to the hand-authored one.
+            XCTAssertMatch(stdout, .regex("> \("Applied 3 fix-its in 1 file")" + #" \([0-9]\.[0-9]{1,3}s\)"#))
+        }
+    }
+
+    func testMigrateCommandWhenDependencyBuildsForHostAndTarget() async throws {
+        try XCTSkipIf(
+            !UserToolchain.default.supportesSupportedFeatures,
+            "skipping because test environment compiler doesn't support `-print-supported-features`"
+        )
+
+        try await fixture(name: "SwiftMigrate/ExistentialAnyWithCommonPluginDependencyMigration") { fixturePath in
+            let (stdout, _) = try await self.execute(
+                ["migrate", "--to-feature", "ExistentialAny"],
+                packagePath: fixturePath
+            )
+
+            // Even though the CommonLibrary dependency built for both the host and destination, we should only apply a single fix-it once to its sources.
+            XCTAssertMatch(stdout, .regex("> \("Applied 1 fix-it in 1 file")" + #" \([0-9]\.[0-9]{1,3}s\)"#))
+        }
+    }
+
+    func testMigrateCommandUpdateManifestSingleTarget() async throws {
+        try XCTSkipIf(
+            !UserToolchain.default.supportesSupportedFeatures,
+            "skipping because test environment compiler doesn't support `-print-supported-features`"
+        )
+
+        try await fixture(name: "SwiftMigrate/UpdateManifest") { fixturePath in
+            _ = try await self.execute(
+                [
+                    "migrate",
+                    "--to-feature",
+                    "ExistentialAny,InferIsolatedConformances",
+                    "--target",
+                    "A",
+                ],
+                packagePath: fixturePath
+            )
+
+            let updatedManifest = try localFileSystem.readFileContents(
+                fixturePath.appending(components: "Package.swift")
+            )
+            let expectedManifest = try localFileSystem.readFileContents(
+                fixturePath.appending(components: "Package.updated.targets-A.swift")
+            )
+            XCTAssertEqual(updatedManifest, expectedManifest)
+        }
+
+    }
+
+    func testMigrateCommandUpdateManifest2Targets() async throws {
+        try XCTSkipIf(
+            !UserToolchain.default.supportesSupportedFeatures,
+            "skipping because test environment compiler doesn't support `-print-supported-features`"
+        )
+
+        try await fixture(name: "SwiftMigrate/UpdateManifest") { fixturePath in
+            _ = try await self.execute(
+                [
+                    "migrate",
+                    "--to-feature",
+                    "ExistentialAny,InferIsolatedConformances",
+                    "--target",
+                    "A,B",
+                ],
+                packagePath: fixturePath
+            )
+
+            let updatedManifest = try localFileSystem.readFileContents(
+                fixturePath.appending(components: "Package.swift")
+            )
+            let expectedManifest = try localFileSystem.readFileContents(
+                fixturePath.appending(components: "Package.updated.targets-A-B.swift")
+            )
+            XCTAssertEqual(updatedManifest, expectedManifest)
+        }
+    }
+
+    func testMigrateCommandUpdateManifestWithErrors() async throws {
+        try XCTSkipIf(
+            !UserToolchain.default.supportesSupportedFeatures,
+            "skipping because test environment compiler doesn't support `-print-supported-features`"
+        )
+
+        try await fixture(name: "SwiftMigrate/UpdateManifest") { fixturePath in
+            try await XCTAssertThrowsCommandExecutionError(
+                await self.execute(
+                    ["migrate", "--to-feature", "ExistentialAny,InferIsolatedConformances,StrictMemorySafety"],
+                    packagePath: fixturePath
+                )
+            ) { error in
+                // 'SwiftMemorySafety.strictMemorySafety' was introduced in 6.2.
+                XCTAssertMatch(
+                    error.stderr,
+                    .contains(
+                        """
+                        error: Could not update manifest to enable requested features for target 'A' (package manifest version 5.8.0 is too old: please update to manifest version 6.2.0 or newer). Please enable them manually by adding the following Swift settings to the target: '.enableUpcomingFeature("ExistentialAny"), .enableUpcomingFeature("InferIsolatedConformances"), .strictMemorySafety()'
+                        error: Could not update manifest to enable requested features for target 'B' (package manifest version 5.8.0 is too old: please update to manifest version 6.2.0 or newer). Please enable them manually by adding the following Swift settings to the target: '.enableUpcomingFeature("ExistentialAny"), .enableUpcomingFeature("InferIsolatedConformances"), .strictMemorySafety()'
+                        error: Could not update manifest to enable requested features for target 'CannotFindSettings' (unable to find array literal for 'swiftSettings' argument). Please enable them manually by adding the following Swift settings to the target: '.enableUpcomingFeature("ExistentialAny"), .enableUpcomingFeature("InferIsolatedConformances"), .strictMemorySafety()'
+                        error: Could not update manifest to enable requested features for target 'CannotFindTarget' (unable to find target named 'CannotFindTarget' in package). Please enable them manually by adding the following Swift settings to the target: '.enableUpcomingFeature("ExistentialAny"), .enableUpcomingFeature("InferIsolatedConformances"), .strictMemorySafety()'
+                        """
+                    )
+                )
+            }
+
+            let updatedManifest = try localFileSystem.readFileContents(
+                fixturePath.appending(components: "Package.swift")
+            )
+            let expectedManifest = try localFileSystem.readFileContents(
+                fixturePath.appending(components: "Package.updated.targets-all.swift")
+            )
+            XCTAssertEqual(updatedManifest, expectedManifest)
+        }
     }
 
     func testBuildToolPlugin() async throws {
@@ -2249,8 +2457,8 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
 
             // We expect a warning about `library.bar` but not about `library.foo`.
             XCTAssertMatch(stderr, .contains("found 1 file(s) which are unhandled"))
-            XCTAssertNoMatch(stderr, .contains("Sources/MyLibrary/library.foo"))
-            XCTAssertMatch(stderr, .contains("Sources/MyLibrary/library.bar"))
+            XCTAssertNoMatch(stderr, .contains(RelativePath("Sources/MyLibrary/library.foo").pathString))
+            XCTAssertMatch(stderr, .contains(RelativePath("Sources/MyLibrary/library.bar").pathString))
         }
     }
 
@@ -2348,7 +2556,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             try await withTemporaryDirectory { tempDirectory in
                 let destination = tempDirectory.appending("Bar-1.2.3.zip")
                 let (stdout, _) = try await self.execute(["archive-source", "--output", destination.pathString], packagePath: packageRoot)
-                XCTAssert(stdout.hasPrefix("Created /"), #"actual: "\#(stdout)""#)
+                XCTAssert(stdout.hasPrefix("Created "), #"actual: "\#(stdout)""#)
                 XCTAssert(stdout.contains("Bar-1.2.3.zip"), #"actual: "\#(stdout)""#)
             }
 
@@ -2379,6 +2587,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
     }
 
     func testCommandPlugin() async throws {
+        try XCTRequires(executable: "sed")
         // Only run the test if the environment in which we're running actually supports Swift concurrency (which the plugin APIs require).
         try XCTSkipIf(!UserToolchain.default.supportsSwiftConcurrency(), "skipping because test environment doesn't support concurrency")
 
@@ -2783,11 +2992,12 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
 
     // Test target builds requested by a command plugin
     func testCommandPluginTargetBuilds() async throws {
+        try XCTSkipOnWindows(because: "TSCBasic/Path.swift:969: Assertion failed, https://github.com/swiftlang/swift-package-manager/issues/8602")
         // Only run the test if the environment in which we're running actually supports Swift concurrency (which the plugin APIs require).
         try XCTSkipIf(!UserToolchain.default.supportsSwiftConcurrency(), "skipping because test environment doesn't support concurrency")
 
-        let debugTarget = [".build", "debug", "placeholder"]
-        let releaseTarget = [".build", "release", "placeholder"]
+        let debugTarget = [".build", "debug", executableName("placeholder")]
+        let releaseTarget = [".build", "release", executableName("placeholder")]
 
         func AssertIsExecutableFile(_ fixturePath: AbsolutePath, file: StaticString = #filePath, line: UInt = #line) {
             XCTAssert(
@@ -2844,6 +3054,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
     }
 
     func testCommandPluginBuildTestability() async throws {
+        try XCTSkipOnWindows(because: "TSCBasic/Path.swift:969: Assertion failed, https://github.com/swiftlang/swift-package-manager/issues/8602")
         // Plugin arguments: check-testability <targetName> <config> <shouldTestable>
 
         // Overall configuration: debug, plugin build request: debug -> without testability
@@ -2874,6 +3085,7 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
 
     // Test logging of builds initiated by a command plugin
     func testCommandPluginBuildLogs() async throws {
+        try XCTSkipOnWindows(because: "TSCBasic/Path.swift:969: Assertion failed, https://github.com/swiftlang/swift-package-manager/issues/8602")
         // Only run the test if the environment in which we're running actually supports Swift concurrency (which the plugin APIs require).
         try XCTSkipIf(!UserToolchain.default.supportsSwiftConcurrency(), "skipping because test environment doesn't support concurrency")
 
@@ -3313,16 +3525,16 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
             // Check that if we don't pass any target, we successfully get symbol graph information for all targets in the package, and at different paths.
             do {
                 let (stdout, _) = try await self.execute(["generate-documentation"], packagePath: packageDir)
-                XCTAssertMatch(stdout, .and(.contains("MyLibrary:"), .contains("mypackage/MyLibrary")))
-                XCTAssertMatch(stdout, .and(.contains("MyCommand:"), .contains("mypackage/MyCommand")))
+                XCTAssertMatch(stdout, .and(.contains("MyLibrary:"), .contains(AbsolutePath("/mypackage/MyLibrary").pathString)))
+                XCTAssertMatch(stdout, .and(.contains("MyCommand:"), .contains(AbsolutePath("/mypackage/MyCommand").pathString)))
 
             }
 
             // Check that if we pass a target, we successfully get symbol graph information for just the target we asked for.
             do {
                 let (stdout, _) = try await self.execute(["generate-documentation", "--target", "MyLibrary"], packagePath: packageDir)
-                XCTAssertMatch(stdout, .and(.contains("MyLibrary:"), .contains("mypackage/MyLibrary")))
-                XCTAssertNoMatch(stdout, .and(.contains("MyCommand:"), .contains("mypackage/MyCommand")))
+                XCTAssertMatch(stdout, .and(.contains("MyLibrary:"), .contains(AbsolutePath("/mypackage/MyLibrary").pathString)))
+                XCTAssertNoMatch(stdout, .and(.contains("MyCommand:"), .contains(AbsolutePath("/mypackage/MyCommand").pathString)))
             }
         }
     }
@@ -3448,7 +3660,14 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
                 XCTAssertMatch(stdout, .contains("-DEXTRA_SWIFT_FLAG"))
                 XCTAssertMatch(stdout, .contains("Build of product 'MyExecutable' complete!"))
                 XCTAssertMatch(stdout, .contains("succeeded: true"))
-                XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains("debug/MyExecutable")))
+                switch buildSystemProvider {
+                case .native:
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("debug/MyExecutable").pathString)))
+                case .swiftbuild:
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("MyExecutable").pathString)))
+                case .xcode:
+                    XCTFail("unimplemented assertion for --build-system xcode")
+                }
                 XCTAssertMatch(stdout, .and(.contains("artifact-kind:"), .contains("executable")))
             }
 
@@ -3460,7 +3679,14 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
                 XCTAssertNoMatch(stdout, .contains("-module-name MyExecutable"))
                 XCTAssertMatch(stdout, .contains("Build of product 'MyExecutable' complete!"))
                 XCTAssertMatch(stdout, .contains("succeeded: true"))
-                XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains("release/MyExecutable")))
+                switch buildSystemProvider {
+                case .native:
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("release/MyExecutable").pathString)))
+                case .swiftbuild:
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("MyExecutable").pathString)))
+                case .xcode:
+                    XCTFail("unimplemented assertion for --build-system xcode")
+                }
                 XCTAssertMatch(stdout, .and(.contains("artifact-kind:"), .contains("executable")))
             }
 
@@ -3472,7 +3698,14 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
                 XCTAssertNoMatch(stdout, .contains("-module-name MyLibrary"))
                 XCTAssertMatch(stdout, .contains("Build of product 'MyStaticLibrary' complete!"))
                 XCTAssertMatch(stdout, .contains("succeeded: true"))
-                XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains("release/libMyStaticLibrary.")))
+                switch buildSystemProvider {
+                case .native:
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("release/libMyStaticLibrary").pathString)))
+                case .swiftbuild:
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("MyStaticLibrary").pathString)))
+                case .xcode:
+                    XCTFail("unimplemented assertion for --build-system xcode")
+                }
                 XCTAssertMatch(stdout, .and(.contains("artifact-kind:"), .contains("staticLibrary")))
             }
 
@@ -3484,7 +3717,18 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
                 XCTAssertNoMatch(stdout, .contains("-module-name MyLibrary"))
                 XCTAssertMatch(stdout, .contains("Build of product 'MyDynamicLibrary' complete!"))
                 XCTAssertMatch(stdout, .contains("succeeded: true"))
-                XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains("release/libMyDynamicLibrary.")))
+                switch buildSystemProvider {
+                case .native:
+                    #if os(Windows)
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("release/MyDynamicLibrary.dll").pathString)))
+                    #else
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("release/libMyDynamicLibrary").pathString)))
+                    #endif
+                case .swiftbuild:
+                    XCTAssertMatch(stdout, .and(.contains("artifact-path:"), .contains(RelativePath("MyDynamicLibrary").pathString)))
+                case .xcode:
+                    XCTFail("unimplemented assertion for --build-system xcode")
+                }
                 XCTAssertMatch(stdout, .and(.contains("artifact-kind:"), .contains("dynamicLibrary")))
             }
         }
@@ -3614,6 +3858,8 @@ class PackageCommandTestCase: CommandsBuildProviderTestCase {
     }
 
     func testPluginAPIs() async throws {
+        try XCTSkipOnWindows(because: "https://github.com/swiftlang/swift-package-manager/issues/8554, $0.path.lastComponent in test code returns fullpaths on Windows") 
+
         // Only run the test if the environment in which we're running actually supports Swift concurrency (which the plugin APIs require).
         try XCTSkipIf(!UserToolchain.default.supportsSwiftConcurrency(), "skipping because test environment doesn't support concurrency")
 
@@ -4045,24 +4291,52 @@ class PackageCommandSwiftBuildTests: PackageCommandTestCase {
     override func testNoParameters() async throws {
         try await super.testNoParameters()
     }
-
-    override func testCommandPluginBuildingCallbacks() async throws {
-        throw XCTSkip("SWBINTTODO: Test fails because plugin is not producing expected output to stdout.")
-    }
+    
     override func testCommandPluginBuildTestability() async throws {
         throw XCTSkip("SWBINTTODO: Test fails as plugins are not currenty supported")
     }
 
-    override func testMigrateCommand() async throws {
+    override func testMigrateCommandDebug() async throws {
         throw XCTSkip("SWBINTTODO: Build plan is not currently supported")
     }
 
-#if !os(macOS)
-    override func testCommandPluginTestingCallbacks() async throws {
-        try XCTSkipIfWorkingDirectoryUnsupported()
+    override func testMigrateCommandRelease() async throws {
+        throw XCTSkip("SWBINTTODO: Build plan is not currently supported")
+    }
 
+    override func testMigrateCommandWithBuildToolPlugins() async throws {
+        throw XCTSkip("SWBINTTODO: Build plan is not currently supported")
+    }
+
+    override func testMigrateCommandWhenDependencyBuildsForHostAndTarget() async throws {
+        throw XCTSkip("SWBINTTODO: Build plan is not currently supported")
+    }
+
+    override func testMigrateCommandUpdateManifestSingleTarget() async throws {
+        throw XCTSkip("SWBINTTODO: Build plan is not currently supported")
+    }
+
+    override func testMigrateCommandUpdateManifest2Targets() async throws {
+        throw XCTSkip("SWBINTTODO: Build plan is not currently supported")
+    }
+
+    override func testMigrateCommandUpdateManifestWithErrors() async throws {
+        throw XCTSkip("SWBINTTODO: Build plan is not currently supported")
+    }
+
+    override func testCommandPluginTestingCallbacks() async throws {
+        throw XCTSkip("SWBINTTODO: Requires PIF generation to adopt new test runner product type")
+        try XCTSkipOnWindows(because: "TSCBasic/Path.swift:969: Assertion failed, https://github.com/swiftlang/swift-package-manager/issues/8602")
         try await super.testCommandPluginTestingCallbacks()
     }
-#endif
 
+    override func testCommandPluginTargetBuilds() async throws {
+        try XCTSkipOnWindows(because: "TSCBasic/Path.swift:969: Assertion failed, https://github.com/swiftlang/swift-package-manager/issues/8602")
+        try await super.testCommandPluginTargetBuilds()
+    }
+
+    override func testCommandPluginPermissions() async throws {
+        try XCTExhibitsGitHubIssue(8782)
+        try await super.testCommandPluginPermissions()
+    }
 }

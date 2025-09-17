@@ -393,6 +393,67 @@ final class PrebuiltsTests: XCTestCase {
         }
     }
 
+    func testRedirectURL() async throws {
+        let sandbox = AbsolutePath("/tmp/ws")
+        let fs = InMemoryFileSystem()
+        let artifact = Data()
+
+        try await with(fileSystem: fs, artifact: artifact, swiftSyntaxVersion: "600.0.1", swiftSyntaxURL: "https://github.com/apple/swift-syntax.git") {
+            manifest, rootCertPath, rootPackage, swiftSyntax in
+
+            let manifestData = try JSONEncoder().encode(manifest)
+
+            let httpClient = HTTPClient { request, progressHandler in
+                guard case .download(let fileSystem, let destination) = request.kind else {
+                    throw StringError("invalid request \(request.kind)")
+                }
+
+                if request.url == "https://download.swift.org/prebuilts/swift-syntax/600.0.1/\(self.swiftVersion)-manifest.json" {
+                    try fileSystem.writeFileContents(destination, data: manifestData)
+                    return .okay()
+                } else if request.url == "https://download.swift.org/prebuilts/swift-syntax/600.0.1/\(self.swiftVersion)-MacroSupport-macos_aarch64.zip" {
+                    try fileSystem.writeFileContents(destination, data: artifact)
+                    return .okay()
+                } else {
+                    XCTFail("Unexpected URL \(request.url)")
+                    return .notFound()
+                }
+            }
+
+            let archiver = MockArchiver(handler: { _, archivePath, destination, completion in
+                XCTAssertEqual(archivePath, sandbox.appending(components: ".build", "prebuilts", "swift-syntax", "600.0.1", "\(self.swiftVersion)-MacroSupport-macos_aarch64.zip"))
+                XCTAssertEqual(destination, sandbox.appending(components: ".build", "prebuilts", "swift-syntax", "600.0.1", "\(self.swiftVersion)-MacroSupport-macos_aarch64"))
+                completion(.success(()))
+            })
+
+            let workspace = try await MockWorkspace(
+                sandbox: sandbox,
+                fileSystem: fs,
+                roots: [
+                    rootPackage
+                ],
+                packages: [
+                    swiftSyntax
+                ],
+                prebuiltsManager: .init(
+                    swiftVersion: swiftVersion,
+                    httpClient: httpClient,
+                    archiver: archiver,
+                    hostPlatform: .macos_aarch64,
+                    rootCertPath: rootCertPath
+                )
+            )
+
+            try await workspace.checkPackageGraph(roots: ["Foo"]) { modulesGraph, diagnostics in
+                XCTAssertTrue(diagnostics.filter({ $0.severity == .error }).isEmpty)
+                let rootPackage = try XCTUnwrap(modulesGraph.rootPackages.first)
+                try checkSettings(rootPackage, "FooMacros", usePrebuilt: true)
+                try checkSettings(rootPackage, "FooTests", usePrebuilt: true)
+                try checkSettings(rootPackage, "Foo", usePrebuilt: false)
+                try checkSettings(rootPackage, "FooClient", usePrebuilt: false)
+            }
+        }
+    }
     func testCachedArtifact() async throws {
         let sandbox = AbsolutePath("/tmp/ws")
         let fs = InMemoryFileSystem()
@@ -632,7 +693,9 @@ final class PrebuiltsTests: XCTestCase {
         try await with(fileSystem: fs, artifact: artifact, swiftSyntaxVersion: "600.0.1") { goodManifest, rootCertPath, rootPackage, swiftSyntax in
             // Make a change in the manifest
             var manifest = goodManifest.manifest
-            manifest.libraries[0].artifacts[0] = .init(platform: manifest.libraries[0].artifacts[0].platform, checksum: "BAD")
+            var artifacts = try XCTUnwrap(manifest.libraries[0].artifacts)
+            artifacts[0] = .init(platform: artifacts[0].platform, checksum: "BAD")
+            manifest.libraries[0].artifacts = artifacts
             let badManifest = Workspace.SignedPrebuiltsManifest(
                 manifest: manifest,
                 signature: goodManifest.signature

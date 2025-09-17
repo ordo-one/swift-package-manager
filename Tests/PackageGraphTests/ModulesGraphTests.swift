@@ -2058,7 +2058,7 @@ final class ModulesGraphTests: XCTestCase {
         }
     }
 
-    func testUnsafeFlags() throws {
+    func loadUnsafeModulesGraph(toolsVersion: ToolsVersion) throws -> TestingObservability {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/Foo/Sources/Foo/foo.swift",
@@ -2071,6 +2071,7 @@ final class ModulesGraphTests: XCTestCase {
         )
 
         let observability = ObservabilitySystem.makeForTesting()
+
         _ = try loadModulesGraph(
             fileSystem: fs,
             manifests: [
@@ -2088,6 +2089,7 @@ final class ModulesGraphTests: XCTestCase {
                 Manifest.createFileSystemManifest(
                     displayName: "Bar",
                     path: "/Bar",
+                    toolsVersion: toolsVersion,
                     products: [
                         ProductDescription(name: "Bar", type: .library(.automatic), targets: ["Bar", "Bar2", "Bar3"]),
                         ProductDescription(
@@ -2126,6 +2128,19 @@ final class ModulesGraphTests: XCTestCase {
             ],
             observabilityScope: observability.topScope
         )
+
+        return observability
+    }
+
+    func testUnsafeFlagsDisabled() throws {
+        let observability = try loadUnsafeModulesGraph(toolsVersion: .v6_2)
+
+        // We have turned off the unsafe flags check
+        XCTAssertEqual(observability.diagnostics.count, 0)
+    }
+
+    func testUnsafeFlagsEnabled() throws {
+        let observability = try loadUnsafeModulesGraph(toolsVersion: .v6_1)
 
         XCTAssertEqual(observability.diagnostics.count, 3)
         testDiagnostics(observability.diagnostics) { result in
@@ -3052,7 +3067,7 @@ final class ModulesGraphTests: XCTestCase {
         )
         // Make sure aliases are found properly and do not fall back to pre‐5.2 behavior, leaking across onto other
         // dependencies.
-        let required = try manifest.dependenciesRequired(for: .everything, nil)
+        let required = try manifest.dependenciesRequired(for: .everything)
         let unrelated = try XCTUnwrap(
             required
                 .first(where: { $0.nameForModuleDependencyResolutionOnly == "Unrelated" })
@@ -4421,18 +4436,11 @@ final class ModulesGraphTests: XCTestCase {
             observabilityScope: observability.topScope
         )
 
-        XCTAssertEqual(observability.diagnostics.count, 1)
-        testDiagnostics(observability.diagnostics) { result in
-            result.check(
-                diagnostic: "dependency 'package5' is not used by any target",
-                severity: .warning
-            )
-        }
-
+        XCTAssertEqual(observability.diagnostics.count, 0)
         PackageGraphTester(graph) { result in
             result.checkPackage("Package1") { package in
                 XCTAssertEqual(package.enabledTraits, ["Package1Trait3"])
-                XCTAssertEqual(package.dependencies.count, 3)
+                XCTAssertEqual(package.dependencies.count, 2)
             }
             result.checkTarget("Package1Target1") { target in
                 target.check(dependencies: "Package2Target1", "Package4Target1")

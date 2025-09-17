@@ -215,7 +215,7 @@ public final class SwiftCommandState {
     }
 
     /// Get the current workspace root object.
-    public func getWorkspaceRoot(traitConfiguration: TraitConfiguration = .default) throws -> PackageGraphRootInput {
+    public func getWorkspaceRoot() throws -> PackageGraphRootInput {
         let packages: [AbsolutePath]
 
         if let workspace = options.locations.multirootPackageDataFile {
@@ -225,7 +225,7 @@ public final class SwiftCommandState {
             packages = try [self.getPackageRoot()]
         }
 
-        return PackageGraphRootInput(packages: packages, traitConfiguration: traitConfiguration)
+        return PackageGraphRootInput(packages: packages, traitConfiguration: self.traitConfiguration)
     }
 
     /// Scratch space (.build) directory.
@@ -291,6 +291,8 @@ public final class SwiftCommandState {
     private let targetInfo: JSON?
 
     package var preferredBuildConfiguration = BuildConfiguration.debug
+
+    package let traitConfiguration: TraitConfiguration
 
     /// Create an instance of this tool.
     ///
@@ -413,6 +415,9 @@ public final class SwiftCommandState {
             explicitDirectory: options.locations.swiftSDKsDirectory ?? options.locations.deprecatedSwiftSDKsDirectory
         )
 
+        // Set the trait configuration from user-passed trait options.
+        self.traitConfiguration = .init(traitOptions: options.traits)
+
         // set global process logging handler
         AsyncProcess.loggingHandler = { self.observabilityScope.emit(debug: $0) }
     }
@@ -420,11 +425,6 @@ public final class SwiftCommandState {
     static func postprocessArgParserResult(options: GlobalOptions, observabilityScope: ObservabilityScope) throws {
         if options.locations.multirootPackageDataFile != nil {
             observabilityScope.emit(.unsupportedFlag("--multiroot-data-file"))
-        }
-
-        if options.build.useExplicitModuleBuild && !options.build.useIntegratedSwiftDriver {
-            observabilityScope
-                .emit(error: "'--experimental-explicit-module-build' option requires '--use-integrated-swift-driver'")
         }
 
         if !options.build.architectures.isEmpty && options.build.customCompileTriple != nil {
@@ -462,8 +462,13 @@ public final class SwiftCommandState {
     }
 
     /// Returns the currently active workspace.
-    public func getActiveWorkspace(emitDeprecatedConfigurationWarning: Bool = false, traitConfiguration: TraitConfiguration = .default) throws -> Workspace {
-        if let workspace = _workspace {
+    public func getActiveWorkspace(emitDeprecatedConfigurationWarning: Bool = false, enableAllTraits: Bool = false) throws -> Workspace {
+        if var workspace = _workspace {
+            // if we decide to override the trait configuration, we can resolve accordingly for
+            // calls like createSymbolGraphForPlugin.
+            if enableAllTraits {
+                workspace = workspace.updateConfiguration(with: .enableAllTraits)
+            }
             return workspace
         }
 
@@ -516,7 +521,7 @@ public final class SwiftCommandState {
                 prebuiltsDownloadURL: options.caching.prebuiltsDownloadURL,
                 prebuiltsRootCertPath: options.caching.prebuiltsRootCertPath,
                 pruneDependencies: self.options.resolver.pruneDependencies,
-                traitConfiguration: traitConfiguration
+                traitConfiguration: self.traitConfiguration
             ),
             cancellator: self.cancellator,
             initializationWarningHandler: { self.observabilityScope.emit(warning: $0) },
@@ -529,9 +534,9 @@ public final class SwiftCommandState {
         return workspace
     }
 
-    public func getRootPackageInformation(traitConfiguration: TraitConfiguration = .default) async throws -> (dependencies: [PackageIdentity: [PackageIdentity]], targets: [PackageIdentity: [String]]) {
-        let workspace = try self.getActiveWorkspace(traitConfiguration: traitConfiguration)
-        let root = try self.getWorkspaceRoot(traitConfiguration: traitConfiguration)
+    public func getRootPackageInformation(_ enableAllTraits: Bool = false) async throws -> (dependencies: [PackageIdentity: [PackageIdentity]], targets: [PackageIdentity: [String]]) {
+        let workspace = try self.getActiveWorkspace(enableAllTraits: enableAllTraits)
+        let root = try self.getWorkspaceRoot()
         let rootManifests = try await workspace.loadRootManifests(
             packages: root.packages,
             observabilityScope: self.observabilityScope
@@ -654,9 +659,9 @@ public final class SwiftCommandState {
     }
 
     /// Resolve the dependencies.
-    public func resolve(_ traitConfiguration: TraitConfiguration = .default) async throws {
-        let workspace = try getActiveWorkspace(traitConfiguration: traitConfiguration)
-        let root = try getWorkspaceRoot(traitConfiguration: traitConfiguration)
+    public func resolve() async throws {
+        let workspace = try getActiveWorkspace()
+        let root = try getWorkspaceRoot()
 
         try await workspace.resolve(
             root: root,
@@ -684,7 +689,7 @@ public final class SwiftCommandState {
     ) async throws -> ModulesGraph {
         try await self.loadPackageGraph(
             explicitProduct: explicitProduct,
-            traitConfiguration: .default,
+            enableAllTraits: false,
             testEntryPointPath: testEntryPointPath
         )
     }
@@ -697,15 +702,15 @@ public final class SwiftCommandState {
     @discardableResult
     package func loadPackageGraph(
         explicitProduct: String? = nil,
-        traitConfiguration: TraitConfiguration = .default,
+        enableAllTraits: Bool = false,
         testEntryPointPath: AbsolutePath? = nil
     ) async throws -> ModulesGraph {
         do {
-            let workspace = try getActiveWorkspace(traitConfiguration: traitConfiguration)
+            let workspace = try getActiveWorkspace(enableAllTraits: enableAllTraits)
 
             // Fetch and load the package graph.
             let graph = try await workspace.loadPackageGraph(
-                rootInput: self.getWorkspaceRoot(traitConfiguration: traitConfiguration),
+                rootInput: self.getWorkspaceRoot(),
                 explicitProduct: explicitProduct,
                 forceResolvedVersions: self.options.resolver.forceResolvedVersions,
                 testEntryPointPath: testEntryPointPath,
@@ -769,7 +774,7 @@ public final class SwiftCommandState {
         // Perform steps for build manifest caching if we can enabled it.
         //
         // FIXME: We don't add edited packages in the package structure command yet (SR-11254).
-        let hasEditedPackages = try await self.getActiveWorkspace(traitConfiguration: traitConfiguration).state.dependencies.contains(where: \.isEdited)
+        let hasEditedPackages = try await self.getActiveWorkspace().state.dependencies.contains(where: \.isEdited)
         if hasEditedPackages {
             return false
         }
@@ -784,7 +789,7 @@ public final class SwiftCommandState {
     public func createBuildSystem(
         explicitBuildSystem: BuildSystemProvider.Kind? = .none,
         explicitProduct: String? = .none,
-        traitConfiguration: TraitConfiguration,
+        enableAllTraits: Bool = false,
         cacheBuildManifest: Bool = true,
         shouldLinkStaticSwiftStdlib: Bool = false,
         productsBuildParameters: BuildParameters? = .none,
@@ -797,14 +802,12 @@ public final class SwiftCommandState {
         guard let buildSystemProvider else {
             fatalError("build system provider not initialized")
         }
-
         var productsParameters = try productsBuildParameters ?? self.productsBuildParameters
         productsParameters.linkingParameters.shouldLinkStaticSwiftStdlib = shouldLinkStaticSwiftStdlib
-
         let buildSystem = try await buildSystemProvider.createBuildSystem(
             kind: explicitBuildSystem ?? self.options.build.buildSystem,
             explicitProduct: explicitProduct,
-            traitConfiguration: traitConfiguration,
+            enableAllTraits: enableAllTraits,
             cacheBuildManifest: cacheBuildManifest,
             productsBuildParameters: productsParameters,
             toolsBuildParameters: toolsBuildParameters,
@@ -874,12 +877,11 @@ public final class SwiftCommandState {
                     flags: ["entry-point-function-name"],
                     toolchain: toolchain,
                     fileSystem: self.fileSystem
-                ),
+                ) && !options.build.sanitizers.contains(.fuzzer),
                 enableParseableModuleInterfaces: self.options.build.shouldEnableParseableModuleInterfaces,
                 explicitTargetDependencyImportCheckingMode: self.options.build.explicitTargetDependencyImportCheck
                     .modeParameter,
                 useIntegratedSwiftDriver: self.options.build.useIntegratedSwiftDriver,
-                useExplicitModuleBuild: self.options.build.useExplicitModuleBuild,
                 isPackageAccessModifierSupported: DriverSupport.isPackageNameSupported(
                     toolchain: toolchain,
                     fileSystem: self.fileSystem
@@ -928,7 +930,7 @@ public final class SwiftCommandState {
         )
     })
 
-    /// Lazily compute the target toolchain.z
+    /// Lazily compute the target toolchain.
     private lazy var _targetToolchain: Result<UserToolchain, Swift.Error> = {
         let swiftSDK: SwiftSDK
         let hostSwiftSDK: SwiftSDK

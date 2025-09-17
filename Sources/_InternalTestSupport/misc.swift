@@ -39,8 +39,18 @@ import enum TSCUtility.Git
 @_exported import func TSCTestSupport.systemQuietly
 @_exported import enum TSCTestSupport.StringPattern
 
-public let isInCiEnvironment = ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] != nil
-public let isSelfHostedCiEnvironment = ProcessInfo.processInfo.environment["SWIFTCI_IS_SELF_HOSTED"] != nil
+@available(*, deprecated, message: "Use CiEnvironment.runningInSmokeTestPipeline")
+public let isInCiEnvironment = CiEnvironment.runningInSmokeTestPipeline
+
+@available(*, deprecated, message: "Use CiEnvironment.isSelfHostedCiEnvironment")
+public let isSelfHostedCiEnvironment = CiEnvironment.runningInSelfHostedPipeline
+
+public struct CiEnvironmentStruct {
+    public let runningInSmokeTestPipeline = ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] != nil
+    public let runningInSelfHostedPipeline = ProcessInfo.processInfo.environment["SWIFTCI_IS_SELF_HOSTED"] != nil
+}
+
+public let CiEnvironment = CiEnvironmentStruct()
 
 public let isRealSigningIdentyEcLabelEnvVarSet =
     ProcessInfo.processInfo.environment["REAL_SIGNING_IDENTITY_EC_LABEL"] != nil
@@ -51,6 +61,14 @@ public let isRealSigningIdentitTestDefined = {
     #else
         return false
     #endif
+}()
+
+public let duplicateSymbolRegex: Regex<AnyRegexOutput>? = {
+    do {
+        return try Regex(".*One of the duplicates must be removed or renamed.")
+    } catch {
+        return nil
+    }
 }()
 
 /// Test helper utility for executing a block with a temporary directory.
@@ -281,13 +299,14 @@ public func getBuildSystemArgs(for buildSystem: BuildSystemProvider.Kind?) -> [S
 @discardableResult
 public func executeSwiftBuild(
     _ packagePath: AbsolutePath?,
-    configuration: Configuration = .Debug,
+    configuration: BuildConfiguration = .debug,
     extraArgs: [String] = [],
     Xcc: [String] = [],
     Xld: [String] = [],
     Xswiftc: [String] = [],
     env: Environment? = nil,
-    buildSystem: BuildSystemProvider.Kind = .native
+    buildSystem: BuildSystemProvider.Kind = .native,
+    throwIfCommandFails: Bool = true,
 ) async throws -> (stdout: String, stderr: String) {
     let args = swiftArgs(
         configuration: configuration,
@@ -297,20 +316,20 @@ public func executeSwiftBuild(
         Xswiftc: Xswiftc,
         buildSystem: buildSystem
     )
-    return try await SwiftPM.Build.execute(args, packagePath: packagePath, env: env)
+    return try await SwiftPM.Build.execute(args, packagePath: packagePath, env: env, throwIfCommandFails: throwIfCommandFails)
 }
 
 @discardableResult
 public func executeSwiftRun(
     _ packagePath: AbsolutePath?,
     _ executable: String?,
-    configuration: Configuration = .Debug,
+    configuration: BuildConfiguration = .debug,
     extraArgs: [String] = [],
     Xcc: [String] = [],
     Xld: [String] = [],
     Xswiftc: [String] = [],
     env: Environment? = nil,
-    buildSystem: BuildSystemProvider.Kind = .native
+    buildSystem: BuildSystemProvider.Kind
 ) async throws -> (stdout: String, stderr: String) {
     var args = swiftArgs(
         configuration: configuration,
@@ -329,7 +348,7 @@ public func executeSwiftRun(
 @discardableResult
 public func executeSwiftPackage(
     _ packagePath: AbsolutePath?,
-    configuration: Configuration = .Debug,
+    configuration: BuildConfiguration = .debug,
     extraArgs: [String] = [],
     Xcc: [String] = [],
     Xld: [String] = [],
@@ -351,7 +370,7 @@ public func executeSwiftPackage(
 @discardableResult
 public func executeSwiftPackageRegistry(
     _ packagePath: AbsolutePath?,
-    configuration: Configuration = .Debug,
+    configuration: BuildConfiguration = .debug,
     extraArgs: [String] = [],
     Xcc: [String] = [],
     Xld: [String] = [],
@@ -373,7 +392,7 @@ public func executeSwiftPackageRegistry(
 @discardableResult
 public func executeSwiftTest(
     _ packagePath: AbsolutePath?,
-    configuration: Configuration = .Debug,
+    configuration: BuildConfiguration = .debug,
     extraArgs: [String] = [],
     Xcc: [String] = [],
     Xld: [String] = [],
@@ -394,7 +413,7 @@ public func executeSwiftTest(
 }
 
 private func swiftArgs(
-    configuration: Configuration,
+    configuration: BuildConfiguration,
     extraArgs: [String],
     Xcc: [String],
     Xld: [String],
@@ -403,9 +422,9 @@ private func swiftArgs(
 ) -> [String] {
     var args = ["--configuration"]
     switch configuration {
-    case .Debug:
+    case .debug:
         args.append("debug")
-    case .Release:
+    case .release:
         args.append("release")
     }
 
@@ -558,4 +577,21 @@ extension AbsolutePath: ExpressibleByStringInterpolation {}
 public func getNumberOfMatches(of match: String, in value: String) -> Int {
     guard match.count != 0 else { return 0 }
     return value.ranges(of: match).count
+}
+
+public extension String {
+    var withSwiftLineEnding: String {   
+        return replacingOccurrences(of: "\r\n", with: "\n")
+    }
+}
+
+public func executableName(_ name: String) -> String {
+#if os(Windows)
+  if name.count > 4, name.suffix(from: name.index(name.endIndex, offsetBy: -4)) == ProcessInfo.exeSuffix {
+    return name
+  }
+  return "\(name)\(ProcessInfo.exeSuffix)"
+#else
+  return name
+#endif
 }

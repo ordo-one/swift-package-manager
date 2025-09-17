@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2021 Apple Inc. and the Swift project authors
+// Copyright (c) 2021-2025 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -18,6 +18,7 @@ import func XCTest.XCTFail
 import struct TSCBasic.StringError
 
 import TSCTestSupport
+import Testing
 
 extension ObservabilitySystem {
     public static func makeForTesting(verbose: Bool = true) -> TestingObservability {
@@ -102,6 +103,18 @@ public func XCTAssertNoDiagnostics(
     XCTFail("Found unexpected diagnostics: \n\(description)", file: file, line: line)
 }
 
+public func expectNoDiagnostics(
+    _ diagnostics: [Basics.Diagnostic],
+    problemsOnly: Bool = true,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    let diagnostics = problemsOnly ? diagnostics.filter { $0.severity >= .warning } : diagnostics
+    if diagnostics.isEmpty { return }
+
+    let description = diagnostics.map { "- " + $0.description }.joined(separator: "\n")
+    Issue.record("Found unexpected diagnostics: \n\(description)", sourceLocation: sourceLocation)
+}
+
 public func testDiagnostics(
     _ diagnostics: [Basics.Diagnostic],
     problemsOnly: Bool = true,
@@ -139,6 +152,37 @@ public func testDiagnostics(
     }
 }
 
+public func expectDiagnostics(
+    _ diagnostics: [Basics.Diagnostic],
+    problemsOnly: Bool = true,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    handler: (DiagnosticsTestResult) throws -> Void
+) throws {
+    try expectDiagnostics(
+        diagnostics,
+        minSeverity: problemsOnly ? .warning : .debug,
+        sourceLocation: sourceLocation,
+        handler: handler
+    )
+}
+
+
+public func expectDiagnostics(
+    _ diagnostics: [Basics.Diagnostic],
+    minSeverity: Basics.Diagnostic.Severity,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    handler: (DiagnosticsTestResult) throws -> Void
+) throws {
+    let diagnostics = diagnostics.filter { $0.severity >= minSeverity }
+    let testResult = DiagnosticsTestResult(diagnostics)
+
+    try handler(testResult)
+
+    if !testResult.uncheckedDiagnostics.isEmpty {
+        Issue.record("unchecked diagnostics \(testResult.uncheckedDiagnostics)", sourceLocation: sourceLocation)
+     }
+}
+ 
 public func testPartialDiagnostics(
     _ diagnostics: [Basics.Diagnostic],
     minSeverity: Basics.Diagnostic.Severity,

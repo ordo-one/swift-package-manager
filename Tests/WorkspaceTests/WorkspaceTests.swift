@@ -227,8 +227,57 @@ final class WorkspaceTests: XCTestCase {
                     )
                     """
                 )
+                if SwiftVersion.current.isDevelopment {
+                    XCTAssertMatch(try ws.interpreterFlags(for: packageManifest), [.equal("-swift-version"), .equal("6")])
+                } else {
+                    XCTAssertThrowsError(
+                        try ws.interpreterFlags(for: packageManifest)
+                    )
+                }
+            }
+
+            do {
+                let ws = try createWorkspace(
+                """
+                // swift-tools-version:6.0
+                import PackageDescription
+                let package = Package(
+                    name: "foo"
+                )
+                """
+                )
 
                 XCTAssertMatch(try ws.interpreterFlags(for: packageManifest), [.equal("-swift-version"), .equal("6")])
+            }
+
+            do {
+                let ws = try createWorkspace(
+                """
+                // swift-tools-version:6.1
+                import PackageDescription
+                let package = Package(
+                    name: "foo"
+                )
+                """
+                )
+
+                XCTAssertMatch(try ws.interpreterFlags(for: packageManifest), [.equal("-swift-version"), .equal("6")])
+                XCTAssertMatch(try ws.interpreterFlags(for: packageManifest), [.equal("-package-description-version"), .equal("6.1.0")])
+            }
+
+            do {
+                let ws = try createWorkspace(
+                """
+                // swift-tools-version:6.2
+                import PackageDescription
+                let package = Package(
+                    name: "foo"
+                )
+                """
+                )
+
+                XCTAssertMatch(try ws.interpreterFlags(for: packageManifest), [.equal("-swift-version"), .equal("6")])
+                XCTAssertMatch(try ws.interpreterFlags(for: packageManifest), [.equal("-package-description-version"), .equal("6.2.0")])
             }
 
             do {
@@ -2448,7 +2497,7 @@ final class WorkspaceTests: XCTestCase {
         await workspace.checkManagedDependencies { result in
             result.check(dependency: "bar", at: .edited(barPath))
         }
-        let barRepo = try workspace.repositoryProvider.openWorkingCopy(at: barPath) as! InMemoryGitRepository
+        let barRepo = try await workspace.repositoryProvider.openWorkingCopy(at: barPath) as! InMemoryGitRepository
         XCTAssert(barRepo.revisions.contains("dev"))
 
         // Test unediting.
@@ -2927,8 +2976,7 @@ final class WorkspaceTests: XCTestCase {
                 nameForTargetDependencyResolutionOnly: settings.nameForTargetDependencyResolutionOnly,
                 location: settings.location,
                 requirement: .exact("1.5.0"),
-                productFilter: settings.productFilter,
-                traits: []
+                productFilter: settings.productFilter
             )
 
             workspace.manifestLoader.manifests[fooKey] = Manifest.createManifest(
@@ -3886,8 +3934,6 @@ final class WorkspaceTests: XCTestCase {
     }
 
     func testResolvedFileSchemeToolsVersion() async throws {
-        let fs = InMemoryFileSystem()
-
         for pair in [
             (ToolsVersion.v5_2, ToolsVersion.v5_2),
             (ToolsVersion.v5_6, ToolsVersion.v5_6),
@@ -5748,7 +5794,7 @@ final class WorkspaceTests: XCTestCase {
                     products: [
                         MockProduct(name: "Bar", modules: ["Bar"]),
                     ],
-                    versions: ["1.0.0", nil]
+                    versions: ["1.0.0", nil],
                 ),
                 MockPackage(
                     name: "Foo",
@@ -5771,7 +5817,7 @@ final class WorkspaceTests: XCTestCase {
                     products: [
                         MockProduct(name: "Bar", modules: ["Bar"]),
                     ],
-                    versions: ["1.0.0", nil]
+                    versions: ["1.0.0", nil],
                 ),
                 MockPackage(
                     name: "Baz",
@@ -5788,13 +5834,15 @@ final class WorkspaceTests: XCTestCase {
                     dependencies: [
                         .sourceControl(path: "./Bar", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
-                    versions: ["1.0.0", "1.5.0"]
+                    versions: ["1.0.0", "1.5.0"],
+                    toolsVersion: .minimumRequired
                 ),
             ]
         )
 
         // We should only see errors about use of unsafe flag in the version-based dependency.
         try await workspace.checkPackageGraph(roots: ["Foo", "Bar"]) { _, diagnostics in
+            // We have disabled the check so there shouldn't be any errors.
             testDiagnostics(diagnostics) { result in
                 let diagnostic1 = result.checkUnordered(
                     diagnostic: .equal("the target 'Baz' in product 'Baz' contains unsafe build flags"),
@@ -5802,12 +5850,10 @@ final class WorkspaceTests: XCTestCase {
                 )
                 XCTAssertEqual(diagnostic1?.metadata?.packageIdentity, .plain("foo"))
                 XCTAssertEqual(diagnostic1?.metadata?.moduleName, "Foo")
-                let diagnostic2 = result.checkUnordered(
-                    diagnostic: .equal("the target 'Bar' in product 'Baz' contains unsafe build flags"),
-                    severity: .error
-                )
-                XCTAssertEqual(diagnostic2?.metadata?.packageIdentity, .plain("foo"))
-                XCTAssertEqual(diagnostic2?.metadata?.moduleName, "Foo")
+
+                // since Bar is using the current tools version and we've disabled the check since 6.2,
+                // the result should now be empty.
+                result.checkIsEmpty()
             }
         }
     }
@@ -15824,7 +15870,7 @@ final class WorkspaceTests: XCTestCase {
                                 .product(
                                     name: "Boo",
                                     package: "Boo",
-                                    // Trait2 disabled; should generate unused dependency warning
+                                    // Trait2 disabled; should remove this dependency from graph
                                     condition: .init(traits: ["Trait2"])
                                 ),
                             ]
@@ -15875,14 +15921,12 @@ final class WorkspaceTests: XCTestCase {
         try await workspace.checkPackageGraph(roots: ["Foo"], deps: deps) { graph, diagnostics in
             PackageGraphTester(graph) { result in
                 result.check(roots: "Foo")
-                result.check(packages: "Baz", "Foo", "Boo")
-                result.check(modules: "Bar", "Baz", "Boo", "Foo")
+                result.check(packages: "Baz", "Foo")
+                result.check(modules: "Bar", "Baz", "Foo")
                 result.checkTarget("Foo") { result in result.check(dependencies: "Baz") }
                 result.checkTarget("Bar") { result in result.check(dependencies: "Baz") }
             }
-            testDiagnostics(diagnostics) { result in
-                result.check(diagnostic: .contains("dependency 'boo' is not used by any target"), severity: .warning)
-            }
+            XCTAssertNoDiagnostics(diagnostics)
         }
         await workspace.checkManagedDependencies { result in
             result.check(dependency: "baz", at: .checkout(.version("1.0.0")))
@@ -16189,7 +16233,7 @@ final class WorkspaceTests: XCTestCase {
 
         try await workspace.checkPackageGraphFailure(roots: ["Foo"], deps: deps) { diagnostics in
             testDiagnostics(diagnostics) { result in
-                result.check(diagnostic: .equal("Trait 'TraitNotFound' enabled by parent package 'foo' is not declared by package 'Baz'. The available traits declared by this package are: TraitFound."), severity: .error)
+                result.check(diagnostic: .equal("Trait 'TraitNotFound' enabled by parent package 'foo' (Foo) is not declared by package 'baz' (Baz). The available traits declared by this package are: TraitFound."), severity: .error)
             }
         }
         await workspace.checkManagedDependencies { result in
@@ -16252,7 +16296,114 @@ final class WorkspaceTests: XCTestCase {
 
         try await workspace.checkPackageGraphFailure(roots: ["Foo"], deps: deps) { diagnostics in
             testDiagnostics(diagnostics) { result in
-                result.check(diagnostic: .equal("Trait 'TraitNotFound' is not declared by package 'Foo'. The available traits declared by this package are: Trait1, Trait2, default."), severity: .error)
+                result.check(diagnostic: .equal("Trait 'TraitNotFound' is not declared by package 'foo' (Foo). The available traits declared by this package are: Trait1, Trait2, default."), severity: .error)
+            }
+        }
+    }
+
+    func testManyTraitsEnableTargetDependency() async throws {
+        let sandbox = AbsolutePath("/tmp/ws/")
+        let fs = InMemoryFileSystem()
+
+        func createMockWorkspace(_ traitConfiguration: TraitConfiguration) async throws -> MockWorkspace {
+            try await MockWorkspace(
+                sandbox: sandbox,
+                fileSystem: fs,
+                roots: [
+                    MockPackage(
+                        name: "Cereal",
+                        targets: [
+                            MockTarget(
+                                name: "Wheat",
+                                dependencies: [
+                                    .product(
+                                        name: "Icing",
+                                        package: "Sugar",
+                                        condition: .init(traits: ["BreakfastOfChampions", "DontTellMom"])
+                                    ),
+                                ]
+                            ),
+                        ],
+                        products: [
+                            MockProduct(name: "YummyBreakfast", modules: ["Wheat"])
+                        ],
+                        dependencies: [
+                            .sourceControl(path: "./Sugar", requirement: .upToNextMajor(from: "1.0.0")),
+                        ],
+                        traits: ["BreakfastOfChampions", "DontTellMom"]
+                    ),
+                ],
+                packages: [
+                    MockPackage(
+                        name: "Sugar",
+                        targets: [
+                            MockTarget(name: "Icing"),
+                        ],
+                        products: [
+                            MockProduct(name: "Icing", modules: ["Icing"]),
+                        ],
+                        versions: ["1.0.0", "1.5.0"]
+                    ),
+                ],
+                traitConfiguration: traitConfiguration
+            )
+        }
+
+
+        let deps: [MockDependency] = [
+            .sourceControl(path: "./Sugar", requirement: .exact("1.0.0"), products: .specific(["Icing"])),
+        ]
+
+        let workspaceOfChampions = try await createMockWorkspace(.enabledTraits(["BreakfastOfChampions"]))
+        try await workspaceOfChampions.checkPackageGraph(roots: ["Cereal"], deps: deps) { graph, diagnostics in
+            XCTAssertNoDiagnostics(diagnostics)
+            PackageGraphTester(graph) { result in
+                result.check(roots: "Cereal")
+                result.check(packages: "cereal", "sugar")
+                result.check(modules: "Wheat", "Icing")
+                result.check(products: "YummyBreakfast", "Icing")
+                result.checkTarget("Wheat") { result in
+                    result.check(dependencies: "Icing")
+                }
+            }
+        }
+
+        let dontTellMomAboutThisWorkspace = try await createMockWorkspace(.enabledTraits(["DontTellMom"]))
+        try await dontTellMomAboutThisWorkspace.checkPackageGraph(roots: ["Cereal"], deps: deps) { graph, diagnostics in
+            XCTAssertNoDiagnostics(diagnostics)
+            PackageGraphTester(graph) { result in
+                result.check(roots: "Cereal")
+                result.check(packages: "cereal", "sugar")
+                result.check(modules: "Wheat", "Icing")
+                result.check(products: "YummyBreakfast", "Icing")
+                result.checkTarget("Wheat") { result in
+                    result.check(dependencies: "Icing")
+                }
+            }
+        }
+
+        let allEnabledTraitsWorkspace = try await createMockWorkspace(.enableAllTraits)
+        try await allEnabledTraitsWorkspace.checkPackageGraph(roots: ["Cereal"], deps: deps) { graph, diagnostics in
+            XCTAssertNoDiagnostics(diagnostics)
+            PackageGraphTester(graph) { result in
+                result.check(roots: "Cereal")
+                result.check(packages: "cereal", "sugar")
+                result.check(modules: "Wheat", "Icing")
+                result.check(products: "YummyBreakfast", "Icing")
+                result.checkTarget("Wheat") { result in
+                    result.check(dependencies: "Icing")
+                }
+            }
+        }
+
+        let noSugarForBreakfastWorkspace = try await createMockWorkspace(.disableAllTraits)
+        try await noSugarForBreakfastWorkspace.checkPackageGraph(roots: ["Cereal"], deps: deps) { graph, diagnostics in
+            XCTAssertNoDiagnostics(diagnostics)
+            PackageGraphTester(graph) { result in
+                result.check(roots: "Cereal")
+                result.check(packages: "cereal")
+                result.check(modules: "Wheat")
+                result.check(products: "YummyBreakfast")
             }
         }
     }

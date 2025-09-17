@@ -585,8 +585,7 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
 
     public func createAPIToolCommonArgs(includeLibrarySearchPaths: Bool) throws -> [String] {
         // API tool runs on products, hence using `self.productsBuildParameters`, not `self.toolsBuildParameters`
-        let buildPath = self.destinationBuildParameters.buildPath.pathString
-        var arguments = ["-I", buildPath]
+        var arguments: [String] = []
 
         // swift-symbolgraph-extract does not support parsing `-use-ld=lld` and
         // will silently error failing the operation.  Filter out this flag
@@ -610,7 +609,12 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         for target in self.targets {
             switch target {
             case .swift(let targetDescription):
-                arguments += ["-I", targetDescription.moduleOutputPath.parentDirectory.pathString]
+                if target.destination == .target {
+                    // Include in the analysis surface target destination. That way auxiliary
+                    // modules from building a build tool (destination == .host) won't conflict
+                    // with the modules intended to analyze.
+                    arguments += ["-I", targetDescription.moduleOutputPath.parentDirectory.pathString]
+                }
             case .clang(let targetDescription):
                 if let includeDir = targetDescription.moduleMap?.parentDirectory {
                     arguments += ["-I", includeDir.pathString]
@@ -1116,13 +1120,40 @@ extension BuildPlan {
             guard visited.insert(.package(package)).inserted else {
                 return []
             }
-            return package.modules.compactMap {
-                if case .test = $0.underlying.type,
-                   !self.graph.rootPackages.contains(id: package.id)
+
+            var successors: [TraversalNode] = []
+            for product in package.products {
+                if case .test = product.underlying.type,
+                   !graph.rootPackages.contains(id: package.id)
                 {
-                    return nil
+                    continue
                 }
-                return .init(module: $0, context: .target)
+
+                successors.append(.init(product: product, context: .target))
+            }
+
+            for module in package.modules {
+                // Tests are discovered through an aggregate product which also
+                // informs their destination.
+                if case .test = module.type {
+                    continue
+                }
+                successors.append(.init(module: module, context: .target))
+            }
+
+            return successors
+        }
+
+        func successors(
+            for product: ResolvedProduct,
+            destination: Destination
+        ) -> [TraversalNode] {
+            guard destination == .host || product.underlying.type == .test else {
+                return []
+            }
+
+            return product.modules.map { module in
+                TraversalNode(module: module, context: destination)
             }
         }
 
@@ -1152,8 +1183,8 @@ extension BuildPlan {
                 successors(for: package)
             case .module(let module, let destination):
                 successors(for: module, destination: destination)
-            case .product:
-                []
+            case .product(let product, let destination):
+                successors(for: product, destination: destination)
             }
         } onNext: { current, parent in
             let parentModule: (ResolvedModule, BuildParameters.Destination)? = switch parent {
